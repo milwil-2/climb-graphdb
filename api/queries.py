@@ -12,10 +12,11 @@ endpoints wired into :mod:`api.index`:
   co-competition (distinct athletes / repeat visits).
 * **U3** jetlagged underperformers (``jetlagged_underperformers``) — join
   low-``rested_index`` ``RestednessState`` to the representative
-  ``Performance.elo_residual`` (residual > 0 ⇒ worse than expected) on the
-  denormalized ``RestednessState.athlete_id`` / ``event_id``.
+  ``Performance.elo_residual`` (residual > 0 ⇒ worse than expected) via the
+  existing ``HAD_STATE`` + ``AT_EVENT`` edges (no string-concat joins).
 * **U5** athlete timeline (``athlete_timeline``) — merged chronological events
-  + ``RestednessState`` (+ optional ``TrainingSignal`` / ``InjuryEvent``).
+  + ``RestednessState`` via the ``AT_EVENT`` edge (+ optional ``TrainingSignal``
+  / ``InjuryEvent``).
 
 Design constraints (same as :mod:`api.rag`)
 -------------------------------------------
@@ -72,6 +73,7 @@ _HAS_RATING = assert_rel("HAS_RATING")
 _HELD_AT = assert_rel("HELD_AT")
 _FACED = assert_rel("FACED")
 _HAD_STATE = assert_rel("HAD_STATE")
+_AT_EVENT = assert_rel("AT_EVENT")
 _HAS_SIGNAL = assert_rel("HAS_SIGNAL")
 _HAD_INJURY = assert_rel("HAD_INJURY")
 
@@ -296,16 +298,15 @@ def venue_clusters() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 #: Join low-rested RestednessState to the representative Performance's
-#: elo_residual on the denormalized athlete_id/event_id. residual > 0 ⇒ the
-#: athlete finished WORSE than expected. Sorted by lowest rested / worst residual.
+#: elo_residual via the HAD_STATE + AT_EVENT edges (clean edge join — no string
+#: concatenation). residual > 0 ⇒ the athlete finished WORSE than expected.
+#: Sorted by lowest rested / worst residual.
 JETLAGGED_CYPHER = (
-    f"MATCH (rs:{_REST}) "
+    f"MATCH (a:{_ATHLETE})-[:{_HAD_STATE}]->(rs:{_REST})-[:{_AT_EVENT}]->(e:{_EVENT}) "
     "WHERE rs.rested_index IS NOT NULL AND rs.rested_index < $rested_max "
-    f"MATCH (a:{_ATHLETE} {{id:'ath:' + toString(rs.athlete_id)}}) "
     f"MATCH (a)-[:{_COMPETED_IN}]->(p:{_PERFORMANCE})"
-    f"-[:{_OF_ROUND}]->(:{_ROUND})-[:{_OF_EVENT}]->(e:{_EVENT}) "
-    "WHERE e.id = 'evt:' + toString(rs.event_id) "
-    "AND p.elo_residual IS NOT NULL AND p.elo_residual > 0 "
+    f"-[:{_OF_ROUND}]->(:{_ROUND})-[:{_OF_EVENT}]->(e) "
+    "WHERE p.elo_residual IS NOT NULL AND p.elo_residual > 0 "
     "WITH a, e, rs, max(p.elo_residual) AS elo_residual "
     "RETURN a.id AS athlete_id, a.name AS athlete_name, "
     "e.id AS event_id, e.name AS event_name, "
@@ -348,15 +349,15 @@ def jetlagged_underperformers() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 #: Events the athlete competed in (chronological), with the matching
-#: RestednessState (by denormalized event_id) folded in. TrainingSignal /
-#: InjuryEvent are pulled separately and may be empty (L4/P5 not built yet).
+#: RestednessState folded in via the AT_EVENT edge (clean edge join — no string
+#: concatenation). TrainingSignal / InjuryEvent are pulled separately and may
+#: be empty (L4/P5 not built yet).
 TIMELINE_EVENTS_CYPHER = (
     f"MATCH (a:{_ATHLETE} {{id:$id}}) "
     f"MATCH (a)-[:{_COMPETED_IN}]->(:{_PERFORMANCE})"
     f"-[:{_OF_ROUND}]->(:{_ROUND})-[:{_OF_EVENT}]->(e:{_EVENT}) "
     f"OPTIONAL MATCH (e)-[:{_HELD_AT}]->(v:{_VENUE}) "
-    f"OPTIONAL MATCH (a)-[:{_HAD_STATE}]->(rs:{_REST}) "
-    "WHERE e.id = 'evt:' + toString(rs.event_id) "
+    f"OPTIONAL MATCH (a)-[:{_HAD_STATE}]->(rs:{_REST})-[:{_AT_EVENT}]->(e) "
     "WITH DISTINCT e, v, rs "
     "RETURN e.id AS event_id, e.name AS event_name, "
     "toString(e.start_date) AS start_date, e.discipline AS discipline, "

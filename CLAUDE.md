@@ -9,7 +9,9 @@ load, imputed training, and competition results for **World-Cup climbing**.
 
 ## Working here — the merge gate (must follow)
 
-- Branch off `main` (`feat|fix|chore|docs/<issue#>-slug`). **Never push to `main`** (branch-protected).
+- **Sync `main`, then branch** — always start from latest to avoid `BEHIND`/conflict churn:
+  `git switch main && git pull`, then `git switch -c feat|fix|chore|docs/<issue#>-slug`.
+  **Never push to `main`** (branch-protected).
 - Open a PR; CI checks **`quality`** + **`gitleaks`** are the enforced hard gate.
 - **Before merging, review the PR yourself**: run **`/security-review`** + **`/code-review`**, confirm no high/critical findings, then label it:
   `gh pr edit <n> --add-label claude-reviewed`.

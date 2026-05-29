@@ -210,31 +210,30 @@ class TestEnvGetters:
 class TestHasLiveNeo4jCreds:
     """The guard backing the ``live_neo4j`` skip fixture (see conftest)."""
 
-    _DUMMIES = {
-        "NEO4J_URI": "bolt://localhost:7687",
-        "NEO4J_USER": "test-instance-id",
-        "NEO4J_PASSWORD": "test-password",
-    }
+    def _set_dummies(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Reuse conftest's single source of truth so the test can't drift if the
+        # dummy fallbacks ever change.
+        from tests.conftest import _DUMMY_NEO4J
+
+        for key, val in _DUMMY_NEO4J.items():
+            monkeypatch.setenv(key, val)
 
     def test_dummy_defaults_are_not_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from tests.conftest import has_live_neo4j_creds
 
-        for key, val in self._DUMMIES.items():
-            monkeypatch.setenv(key, val)
+        self._set_dummies(monkeypatch)
         assert has_live_neo4j_creds() is False
 
     def test_real_uri_is_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from tests.conftest import has_live_neo4j_creds
 
-        for key, val in self._DUMMIES.items():
-            monkeypatch.setenv(key, val)
+        self._set_dummies(monkeypatch)
         monkeypatch.setenv("NEO4J_URI", "neo4j+s://real.databases.neo4j.io")
         assert has_live_neo4j_creds() is True
 
     def test_real_password_is_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from tests.conftest import has_live_neo4j_creds
 
-        for key, val in self._DUMMIES.items():
-            monkeypatch.setenv(key, val)
+        self._set_dummies(monkeypatch)
         monkeypatch.setenv("NEO4J_PASSWORD", "s3cret-from-aura")
         assert has_live_neo4j_creds() is True

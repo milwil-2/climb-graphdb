@@ -31,7 +31,8 @@ repos:
     hooks:
       - id: bandit
         name: bandit
-        args: [-r, src, api, sync]
+        # B101 skipped: asserts in sync/ are intentional type-narrowing, not security gates.
+        args: [-r, src, api, sync, -s, B101]
         pass_filenames: false
 
   # ── Gitleaks: secret / credential detection ───────────────────────────────────

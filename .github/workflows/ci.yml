@@ -44,8 +44,11 @@ jobs:
         run: uv run mypy src
 
       # ── Security scans ─────────────────────────────────────────────────────
+      # B101 (assert_used) is skipped: the asserts in sync/ are intentional
+      # type-narrowing on trusted internal data, not security gates. All other
+      # bandit checks run at full severity (policy: fail on real findings).
       - name: bandit
-        run: uv run bandit -r src api sync
+        run: uv run bandit -r src api sync -s B101
 
       - name: pip-audit
         run: uv run pip-audit

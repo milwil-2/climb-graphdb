@@ -1,0 +1,31 @@
+# Dependabot configuration for climb-graphdb
+# Automated weekly dependency update PRs for pip packages and GitHub Actions.
+
+version: 2
+
+updates:
+  # ── Python dependencies ───────────────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - python
+
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - github-actions

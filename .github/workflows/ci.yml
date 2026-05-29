@@ -1,0 +1,88 @@
+# CI quality gate for climb-graphdb
+#
+# NOTE: No live Neo4j or Supabase connections are made in CI.
+#       All graph and DB interactions are exercised via pytest fixtures only.
+#
+# Jobs:
+#   quality  — lint, type-check, security scans, tests, isolation guards
+#   gitleaks — dedicated secret-scanning job (runs independently)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # ── Primary quality gate ────────────────────────────────────────────────────
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for gitleaks in the main job
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # ── Lint & format ──────────────────────────────────────────────────────
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      # ── Type checking ──────────────────────────────────────────────────────
+      - name: mypy
+        run: uv run mypy src
+
+      # ── Security scans ─────────────────────────────────────────────────────
+      # NOTE: sync/ does not exist yet in P0; add it here once introduced.
+      - name: bandit
+        run: uv run bandit -r src api
+
+      - name: pip-audit
+        run: uv run pip-audit
+
+      # ── Tests ──────────────────────────────────────────────────────────────
+      - name: pytest
+        run: uv run pytest --cov=src --cov-report=term-missing
+
+      # ── Isolation guard ────────────────────────────────────────────────────
+      # Fails the build if any file under src/, sync/, or api/ tries to import
+      # the sibling projects climbing_elo or knowledge_graph.
+      # This project must be fully self-contained and NEVER depend on those.
+      # NOTE: add sync/ to the search dirs once that package is introduced.
+      - name: Isolation guard
+        run: |
+          ! grep -rnE "^(from|import) (climbing_elo|knowledge_graph)" src api 2>/dev/null
+
+      # ── Tracked-secrets guard ──────────────────────────────────────────────
+      # Fails the build if a bare .env file or a data payload (csv/db/sqlite/
+      # parquet) has been accidentally committed to the repository.
+      - name: Tracked-secrets guard
+        run: |
+          ! git ls-files | grep -E "^\.env$|^data/.*\.(csv|db|sqlite|parquet)$"
+
+  # ── Dedicated gitleaks secret-scan job ─────────────────────────────────────
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

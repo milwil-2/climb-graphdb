@@ -1,0 +1,30 @@
+# ── Secrets & credentials (mirror .gitignore) ─────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*credentials*
+*secret*
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data/
+
+# ── Deployment: exclude dev/build/test artefacts not needed by api/ + src/ ────
+sync/
+tests/
+.github/
+cypher/
+*.md
+
+# ── Tooling caches (not needed by the runtime, but not secret) ────────────────
+# .venv/ and __pycache__/ are intentionally NOT listed here because Vercel's
+# build process may need them; they are handled by the build environment.
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+dist/
+*.egg-info/

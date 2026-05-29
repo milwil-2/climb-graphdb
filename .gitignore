@@ -1,0 +1,37 @@
+# ── Secrets & credentials ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*credentials*
+*secret*
+
+# ── Data: large / fetched / proprietary ───────────────────────────────────────
+data/**
+!data/athlete_handles.yaml
+!data/**/.gitkeep
+*.db
+*.sqlite
+*.csv
+*.parquet
+
+# ── Build & tooling ───────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+dist/
+*.egg-info/
+.vercel/
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/

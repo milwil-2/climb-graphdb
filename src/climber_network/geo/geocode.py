@@ -37,6 +37,7 @@ upper-case key, so lookups work with either form.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -58,9 +59,13 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "uiaa",
         "climbing",
         "world",
+        "worldcup",  # older events spell "Worldcup" as one word
         "cup",
+        "series",
         "championship",
         "championships",
+        "masters",
+        "invitational",
         "boulder",
         "bouldering",
         "lead",
@@ -70,17 +75,138 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "para",
         "youth",
         "open",
+        "continental",
+        # Region qualifiers that prefix a host city.
+        "europe",
         "european",
+        "asia",
         "asian",
+        "oceania",
+        "oceanian",
+        "americas",
+        "american",
         "panamerican",
         "pan-american",
-        "oceania",
+        "africa",
         "african",
-        "continental",
+        # Group qualifiers, e.g. "Lead Group A Paris" → "Paris".
+        "group",
+        "a",
+        "b",
         "and",
         "amp",  # leftover from "&amp;"
     }
 )
+
+# Map IOC 3-letter codes (used by IFSC in parens, e.g. "Chamonix (FRA)") to
+# ISO 3166-1 alpha-2 codes. The GeoNames cities1000 file is keyed on alpha-2,
+# so this is the form we constrain lookups by. Note IOC codes differ from ISO
+# alpha-3 (e.g. SUI≠CHE, GER≠DEU, SLO≠SVN), which is exactly why this map is
+# needed. Covers every distinct parens code present in the event data plus a
+# margin of likely future hosts.
+IOC_TO_ALPHA2: dict[str, str] = {
+    "FRA": "FR",
+    "ITA": "IT",
+    "CHN": "CN",
+    "AUT": "AT",
+    "JPN": "JP",
+    "SLO": "SI",
+    "SUI": "CH",
+    "KOR": "KR",
+    "RUS": "RU",
+    "GER": "DE",
+    "BEL": "BE",
+    "USA": "US",
+    "GBR": "GB",
+    "ESP": "ES",
+    "NOR": "NO",
+    "CAN": "CA",
+    "IND": "IN",
+    "INA": "ID",
+    "NED": "NL",
+    "CZE": "CZ",
+    "POL": "PL",
+    "CHI": "CL",  # IOC CHI = Chile (ISO CL); ISO alpha-3 CHL.
+    "BRA": "BR",
+    "SRB": "RS",
+    "SWE": "SE",
+    "FIN": "FI",
+    "SVK": "SK",
+    "IRI": "IR",
+    "TPE": "TW",
+    "HKG": "HK",
+    "AUS": "AU",
+    "RSA": "ZA",
+}
+
+#: Inverse of the relevant slice of the IOC→ISO map: alpha-2 → ISO 3166-1
+#: alpha-3, used to label the ``Country`` node (whose ids are alpha-3).
+_ALPHA2_TO_ALPHA3: dict[str, str] = {
+    "FR": "FRA",
+    "IT": "ITA",
+    "CN": "CHN",
+    "AT": "AUT",
+    "JP": "JPN",
+    "SI": "SVN",
+    "CH": "CHE",
+    "KR": "KOR",
+    "RU": "RUS",
+    "DE": "DEU",
+    "BE": "BEL",
+    "US": "USA",
+    "GB": "GBR",
+    "ES": "ESP",
+    "NO": "NOR",
+    "CA": "CAN",
+    "IN": "IND",
+    "ID": "IDN",
+    "NL": "NLD",
+    "CZ": "CZE",
+    "PL": "POL",
+    "CL": "CHL",
+    "BR": "BRA",
+    "RS": "SRB",
+    "SE": "SWE",
+    "FI": "FIN",
+    "SK": "SVK",
+    "IR": "IRN",
+    "TW": "TWN",
+    "HK": "HKG",
+    "AU": "AUS",
+    "ZA": "ZAF",
+}
+
+#: Matches a parenthesised IOC country code, e.g. "... Chamonix (FRA) 2022".
+_PARENS_CODE_RE = re.compile(r"\(([A-Z]{3})\)")
+
+
+def parse_ioc_alpha2(event_name: str) -> str | None:
+    """Return the ISO alpha-2 host country from a parenthesised IOC code, if any.
+
+    IFSC event names embed the host country as a 3-letter IOC code in
+    parentheses (``"... Chamonix (FRA) 2022"``). We extract it and map IOC→ISO
+    alpha-2 so the GeoNames lookup can be constrained.
+
+    >>> parse_ioc_alpha2("IFSC - Climbing World Cup (L,S) - Chamonix (FRA) 2022")
+    'FR'
+    >>> parse_ioc_alpha2("IFSC World Cup Innsbruck 2025") is None
+    True
+
+    Only true country codes count: discipline tags like ``(B,L,S)`` never match
+    the ``([A-Z]{3})`` shape, and an unknown 3-letter code returns ``None``.
+    """
+    for code in _PARENS_CODE_RE.findall(event_name):
+        alpha2 = IOC_TO_ALPHA2.get(code)
+        if alpha2 is not None:
+            return alpha2
+    return None
+
+
+def alpha2_to_alpha3(alpha2: str | None) -> str | None:
+    """Map an ISO alpha-2 code to alpha-3 (for the ``Country`` node id)."""
+    if not alpha2:
+        return None
+    return _ALPHA2_TO_ALPHA3.get(alpha2.strip().upper())
 
 
 def _is_year(token: str) -> bool:
@@ -177,15 +303,28 @@ _COL_TIMEZONE = 17
 _MIN_COLUMNS = _COL_TIMEZONE + 1
 
 
+#: Translation table folding curly/typographic apostrophes to ASCII "'".
+_APOSTROPHE_FOLD = {ord(c): "'" for c in "‘’ʼ`´"}
+
+
 def _norm_city(name: str) -> str:
     """Normalise a city name for indexing: ASCII-fold, lower-case, trim.
 
     Accents are stripped (``"Zürich"`` → ``"zurich"``) so that lookups are
     robust to the spelling variant the caller happens to have.
     """
+    # Fold the various Unicode apostrophe/quote glyphs to a plain ASCII "'" so
+    # that "Tai'an" (straight quote, event data) and "Tai’an" (curly quote,
+    # GeoNames file) hash to the same key.
+    name = name.translate(_APOSTROPHE_FOLD)
     decomposed = unicodedata.normalize("NFKD", name)
     ascii_only = "".join(c for c in decomposed if not unicodedata.combining(c))
     return ascii_only.casefold().strip()
+
+
+#: Public alias for the city-name normaliser, so callers (e.g. the sync layer's
+#: country backfill) key their own maps consistently with the index.
+norm_city = _norm_city
 
 
 def _norm_country(iso: str | None) -> str | None:
@@ -216,6 +355,10 @@ class GeoNamesIndex:
     def __init__(self) -> None:
         self._by_city_country: dict[tuple[str, str], GeoPoint] = {}
         self._by_city: dict[str, GeoPoint] = {}
+        #: Count of *distinct* countries a city name appears in, used to tell a
+        #: genuinely unique city (safe to resolve without a country) from an
+        #: ambiguous one (must not guess when the country is unknown).
+        self._city_countries: dict[str, set[str]] = {}
 
     # -- construction -------------------------------------------------------
 
@@ -225,6 +368,7 @@ class GeoNamesIndex:
             self._by_city[city_key] = point
         country_key = _norm_country(country)
         if city_key and country_key is not None:
+            self._city_countries.setdefault(city_key, set()).add(country_key)
             key = (city_key, country_key)
             if key not in self._by_city_country:
                 self._by_city_country[key] = point
@@ -306,23 +450,186 @@ class GeoNamesIndex:
 
     # -- query --------------------------------------------------------------
 
-    def lookup(self, city: str, country_iso3: str | None) -> GeoPoint | None:
-        """Return the :class:`GeoPoint` for *city* (optionally within a country).
+    def lookup(self, city: str, country: str | None) -> GeoPoint | None:
+        """Return the :class:`GeoPoint` for *city*, optionally within a country.
 
-        Matching is accent- and case-insensitive on the city name. If
-        *country_iso3* is given, the ``(city, country)`` index is tried first;
-        on a miss (or when no country is supplied) it falls back to a
-        city-only match. Returns ``None`` if nothing matches.
+        Matching is accent- and case-insensitive on the city name. *country* may
+        be ISO alpha-2 (the GeoNames file form, as produced by
+        :func:`parse_ioc_alpha2`) or alpha-3 — it just needs to match whatever
+        form the index was built with.
+
+        Resolution order:
+
+        1. If a *country* is supplied, the ``(city, country)`` index is tried
+           first — this is what disambiguates names like *Madrid* (ES vs CO) or
+           *Bali* (ID vs CM).
+        2. On a country miss (or when no country is supplied) it falls back to a
+           city-only match **only when the city name is genuinely unique** across
+           all indexed countries. Ambiguous names with no usable country
+           constraint return ``None`` rather than guessing the wrong place.
+
+        Returns ``None`` if nothing matches.
         """
         city_key = _norm_city(city)
         if not city_key:
             return None
-        country_key = _norm_country(country_iso3)
+        country_key = _norm_country(country)
         if country_key is not None:
             hit = self._by_city_country.get((city_key, country_key))
             if hit is not None:
                 return hit
-        return self._by_city.get(city_key)
+        # Unconstrained fallback: safe only when the name is unambiguous.
+        if len(self._city_countries.get(city_key, set())) <= 1:
+            return self._by_city.get(city_key)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Curated override map
+# ---------------------------------------------------------------------------
+#
+# A small, committed, deterministic table that pins the cleaned-city names the
+# pure GeoNames lookup gets wrong. Three flavours, all keyed by ``_norm_city``
+# of the extracted city:
+#
+#   * redirect — the extracted name differs from GeoNames' canonical spelling
+#     (Chamonix → "Chamonix-Mont-Blanc"; Villars → "Villars-sur-Ollon" in CH,
+#     not the FR "Villars"; Brixen → "Bressanone"; "Comunidad de Madrid" →
+#     "Madrid"; "Hachioji Tokyo" → "Hachioji"). Resolved through the index with
+#     an explicit alpha-2 constraint.
+#   * pin — the name is fine but we force the country (e.g. Navi Mumbai → IN) to
+#     skip ambiguity.
+#   * absent — the city is not in cities1000 at all (Wujiang, Keqiao). We supply
+#     explicit coordinates + IANA timezone; ``geonameid`` is a 0 sentinel since
+#     GeoNames has no id for it.
+
+
+@dataclass(frozen=True)
+class _Override:
+    """A curated resolution. Either a redirect/pin (``canonical``+``alpha2``)
+    or an absent-city literal (``point``)."""
+
+    canonical: str | None = None
+    alpha2: str | None = None
+    point: GeoPoint | None = None
+
+
+_CITY_OVERRIDES: dict[str, _Override] = {
+    # Canonical-name mismatches (redirect into the index under the real name).
+    _norm_city("Chamonix"): _Override(canonical="Chamonix-Mont-Blanc", alpha2="FR"),
+    _norm_city("Villars"): _Override(canonical="Villars-sur-Ollon", alpha2="CH"),
+    _norm_city("Brixen"): _Override(canonical="Bressanone", alpha2="IT"),
+    # Region / administrative names that wrap a host city.
+    _norm_city("Comunidad de Madrid"): _Override(canonical="Madrid", alpha2="ES"),
+    # Composite names ("Hachioji, Tokyo" → the city of Hachioji).
+    _norm_city("Hachioji Tokyo"): _Override(canonical="Hachioji", alpha2="JP"),
+    # Country pins to skip ambiguity (the GeoNames name is already correct).
+    # These IFSC hosts share their name with other places and never appear with
+    # a parens code in the data, so we pin the right country explicitly.
+    _norm_city("Navi Mumbai"): _Override(canonical="Navi Mumbai", alpha2="IN"),
+    _norm_city("Prague"): _Override(canonical="Prague", alpha2="CZ"),
+    _norm_city("Santiago"): _Override(canonical="Santiago", alpha2="CL"),
+    # Cities absent from cities1000 — explicit coordinates + timezone.
+    _norm_city("Wujiang"): _Override(
+        alpha2="CN",
+        point=GeoPoint(
+            lat=31.1592,
+            lon=120.6371,
+            geonameid=0,
+            name="Wujiang",
+            timezone="Asia/Shanghai",
+        ),
+    ),
+    _norm_city("Keqiao"): _Override(
+        alpha2="CN",
+        point=GeoPoint(
+            lat=30.0813,
+            lon=120.4889,
+            geonameid=0,
+            name="Keqiao",
+            timezone="Asia/Shanghai",
+        ),
+    ),
+    # The IFSC "Bali" World Cup is on the island of Bali (Denpasar area); there
+    # is no cities1000 entry named "Bali" in Indonesia, so pin coordinates.
+    _norm_city("Bali"): _Override(
+        alpha2="ID",
+        point=GeoPoint(
+            lat=-8.65,
+            lon=115.2167,
+            geonameid=0,
+            name="Bali",
+            timezone="Asia/Makassar",
+        ),
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# End-to-end resolution
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """The outcome of resolving an event name to a place.
+
+    ``point`` is the resolved city (or ``None`` if unresolved). ``alpha2`` is
+    the best-known host country (alpha-2) — set even on a city miss when the
+    parens IOC code or backfill gave us one, so the caller can still anchor a
+    country-level fallback.
+    """
+
+    point: GeoPoint | None
+    alpha2: str | None
+
+
+def override_alpha2(event_name: str) -> str | None:
+    """Return the curated override's pinned host country for *event_name*, if any.
+
+    Pure (no index): lets the sync layer settle the host country up front so the
+    ``Country`` node is labelled even when the name had no parens code and no
+    backfill match (e.g. "Comunidad de Madrid" → ES).
+    """
+    city = extract_city(event_name, None)
+    if not city:
+        return None
+    override = _CITY_OVERRIDES.get(_norm_city(city))
+    return override.alpha2 if override is not None else None
+
+
+def resolve_event(
+    event_name: str,
+    geonames: GeoNamesIndex,
+    *,
+    alpha2: str | None = None,
+) -> Resolution:
+    """Resolve an IFSC event name to a city + host country (offline).
+
+    Pipeline: extract the city → determine the host country (the explicit
+    *alpha2* hint, else the parsed parens IOC code) → consult the curated
+    override table → constrained GeoNames lookup. The *alpha2* hint lets the
+    sync layer pass a backfilled country for events whose own name lacks a
+    parens code (e.g. a bare "Innsbruck" inheriting AT from "Innsbruck (AUT)").
+
+    Returns a :class:`Resolution`; ``point`` is ``None`` when no city matched.
+    """
+    host = alpha2 or parse_ioc_alpha2(event_name)
+    city = extract_city(event_name, host)
+    if not city:
+        return Resolution(point=None, alpha2=host)
+
+    override = _CITY_OVERRIDES.get(_norm_city(city))
+    if override is not None:
+        if override.point is not None:
+            return Resolution(point=override.point, alpha2=host or override.alpha2)
+        # redirect / pin: look up the canonical name under the pinned country.
+        assert override.canonical is not None
+        point = geonames.lookup(override.canonical, override.alpha2 or host)
+        return Resolution(point=point, alpha2=host or override.alpha2)
+
+    point = geonames.lookup(city, host)
+    return Resolution(point=point, alpha2=host)
 
 
 # ---------------------------------------------------------------------------

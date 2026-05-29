@@ -13,7 +13,11 @@ import pytest
 from climber_network.geo.geocode import (
     GeoNamesIndex,
     GeoPoint,
+    alpha2_to_alpha3,
     extract_city,
+    override_alpha2,
+    parse_ioc_alpha2,
+    resolve_event,
     tz_for,
     utc_offset_hours,
 )
@@ -101,6 +105,52 @@ class TestExtractCity:
     def test_country_arg_optional(self) -> None:
         assert extract_city("IFSC World Cup Villars 2023", None) == "Villars"
 
+    def test_worldcup_one_word_stripped(self) -> None:
+        # Older events spell "Worldcup" as a single token.
+        assert extract_city("IFSC Climbing Worldcup (L) - Kranj (SLO) 2017", None) == "Kranj"
+
+    def test_world_climbing_series_stripped(self) -> None:
+        assert extract_city("World Climbing Series Innsbruck 2026", None) == "Innsbruck"
+
+    def test_group_qualifier_stripped(self) -> None:
+        # "Lead Group A Paris" → "Paris" (group / A / lead are all noise).
+        assert extract_city("IFSC World Championship Lead Group A - Paris 2012", None) == "Paris"
+
+    def test_continental_region_stripped(self) -> None:
+        result = extract_city(
+            "IFSC Europe - Continental Championships (B,S,L,C) - Moscow (RUS) 2020", None
+        )
+        assert result == "Moscow"
+
+
+# ---------------------------------------------------------------------------
+# IOC parens-code parsing + IOC→ISO mapping
+# ---------------------------------------------------------------------------
+
+
+class TestParseIocAlpha2:
+    def test_basic(self) -> None:
+        assert parse_ioc_alpha2("IFSC - World Cup (L,S) - Chamonix (FRA) 2022") == "FR"
+
+    def test_ioc_differs_from_iso(self) -> None:
+        # SUI (IOC) → CH (ISO alpha-2), NOT "SU"; GER → DE; SLO → SI.
+        assert parse_ioc_alpha2("... Villars (SUI) 2021") == "CH"
+        assert parse_ioc_alpha2("... Munich (GER) 2018") == "DE"
+        assert parse_ioc_alpha2("... Kranj (SLO) 2017") == "SI"
+
+    def test_discipline_tag_is_not_a_country(self) -> None:
+        # "(B,L,S)" is a discipline tag, not a 3-letter code → no match.
+        assert parse_ioc_alpha2("IFSC World Championships (B,L,S) - Moscow 2021") is None
+
+    def test_no_code(self) -> None:
+        assert parse_ioc_alpha2("IFSC World Cup Innsbruck 2025") is None
+
+    def test_alpha2_to_alpha3(self) -> None:
+        # IOC SUI → alpha-2 CH → ISO alpha-3 CHE (used for the Country node).
+        assert alpha2_to_alpha3("CH") == "CHE"
+        assert alpha2_to_alpha3("SI") == "SVN"
+        assert alpha2_to_alpha3(None) is None
+
 
 # ---------------------------------------------------------------------------
 # GeoNamesIndex
@@ -165,6 +215,144 @@ class TestGeoNamesIndex:
             name="Testville",
             timezone="Europe/Paris",
         )
+
+
+# ---------------------------------------------------------------------------
+# Country-constrained disambiguation + end-to-end resolve_event
+# ---------------------------------------------------------------------------
+
+# An index seeded with ambiguous names (Madrid in CO/ES/US; Arco in IT/US) plus
+# the canonical spellings used by the override redirects.
+_AMBIGUOUS_RECORDS: list[dict[str, object]] = [
+    {
+        "geonameid": 3674962,
+        "name": "Madrid",
+        "lat": 4.0,
+        "lon": -74.0,
+        "country": "CO",
+        "timezone": "America/Bogota",
+    },
+    {
+        "geonameid": 3117735,
+        "name": "Madrid",
+        "lat": 40.4165,
+        "lon": -3.70256,
+        "country": "ES",
+        "timezone": "Europe/Madrid",
+    },
+    {
+        "geonameid": 3170831,
+        "name": "Arco",
+        "lat": 45.918,
+        "lon": 10.884,
+        "country": "IT",
+        "timezone": "Europe/Rome",
+    },
+    {
+        "geonameid": 5552450,
+        "name": "Arco",
+        "lat": 32.0,
+        "lon": -109.0,
+        "country": "US",
+        "timezone": "America/Phoenix",
+    },
+    {
+        "geonameid": 3027301,
+        "name": "Chamonix-Mont-Blanc",
+        "lat": 45.92375,
+        "lon": 6.86933,
+        "country": "FR",
+        "timezone": "Europe/Paris",
+    },
+    {
+        "geonameid": 2658126,
+        "name": "Villars-sur-Ollon",
+        "lat": 46.3,
+        "lon": 7.06,
+        "country": "CH",
+        "timezone": "Europe/Zurich",
+    },
+    {
+        "geonameid": 1835848,
+        "name": "Seoul",
+        "lat": 37.566,
+        "lon": 126.978,
+        "country": "KR",
+        "timezone": "Asia/Seoul",
+    },
+]
+
+
+@pytest.fixture
+def ambiguous_index() -> GeoNamesIndex:
+    return GeoNamesIndex.from_records(_AMBIGUOUS_RECORDS)
+
+
+class TestCountryConstrainedLookup:
+    def test_madrid_resolves_to_spain_not_colombia(self, ambiguous_index: GeoNamesIndex) -> None:
+        # The headline bug: an unconstrained Madrid lookup grabbed Colombia.
+        point = ambiguous_index.lookup("Madrid", "ES")
+        assert point is not None
+        assert point.geonameid == 3117735
+        assert point.timezone == "Europe/Madrid"
+
+    def test_arco_resolves_to_italy(self, ambiguous_index: GeoNamesIndex) -> None:
+        point = ambiguous_index.lookup("Arco", "IT")
+        assert point is not None
+        assert point.geonameid == 3170831
+
+    def test_ambiguous_without_country_returns_none(self, ambiguous_index: GeoNamesIndex) -> None:
+        # No country + multiple countries for the name → refuse to guess.
+        assert ambiguous_index.lookup("Madrid", None) is None
+        assert ambiguous_index.lookup("Arco", None) is None
+
+    def test_unique_city_still_falls_back(self, ambiguous_index: GeoNamesIndex) -> None:
+        # Seoul appears in exactly one country → safe to resolve uncountried.
+        point = ambiguous_index.lookup("Seoul", None)
+        assert point is not None and point.geonameid == 1835848
+
+
+class TestResolveEvent:
+    def test_madrid_region_name_resolves_to_spain(self, ambiguous_index: GeoNamesIndex) -> None:
+        # "Comunidad de Madrid" with no parens code → override pins ES.
+        res = resolve_event("World Climbing Series Comunidad de Madrid 2026", ambiguous_index)
+        assert res.point is not None
+        assert res.point.geonameid == 3117735
+        assert alpha2_to_alpha3(res.alpha2) == "ESP"
+
+    def test_chamonix_canonical_redirect(self, ambiguous_index: GeoNamesIndex) -> None:
+        res = resolve_event("IFSC World Cup Chamonix 2025", ambiguous_index)
+        assert res.point is not None
+        assert res.point.name == "Chamonix-Mont-Blanc"
+        assert alpha2_to_alpha3(res.alpha2) == "FRA"
+
+    def test_villars_redirects_to_swiss_canonical(self, ambiguous_index: GeoNamesIndex) -> None:
+        res = resolve_event("IFSC - World Cup (L,S) - Villars (SUI) 2021", ambiguous_index)
+        assert res.point is not None
+        assert res.point.name == "Villars-sur-Ollon"
+        assert alpha2_to_alpha3(res.alpha2) == "CHE"
+
+    def test_arco_parens_code_constrains(self, ambiguous_index: GeoNamesIndex) -> None:
+        res = resolve_event("IFSC Climbing Worldcup (L,S) - Arco (ITA) 2018", ambiguous_index)
+        assert res.point is not None and res.point.geonameid == 3170831
+
+    def test_absent_city_override(self, ambiguous_index: GeoNamesIndex) -> None:
+        # Wujiang is not in cities1000 → curated absent-city override.
+        res = resolve_event("IFSC World Cup Wujiang 2025", ambiguous_index)
+        assert res.point is not None
+        assert res.point.name == "Wujiang"
+        assert res.point.timezone == "Asia/Shanghai"
+        assert alpha2_to_alpha3(res.alpha2) == "CHN"
+
+    def test_alpha2_hint_backfills_country(self, ambiguous_index: GeoNamesIndex) -> None:
+        # A bare "Madrid" with an explicit alpha-2 hint (backfill) resolves to ES.
+        res = resolve_event("IFSC World Cup Madrid 2025", ambiguous_index, alpha2="ES")
+        assert res.point is not None and res.point.geonameid == 3117735
+
+    def test_override_alpha2_pin(self) -> None:
+        # The pure country settler used by the sync backfill chain.
+        assert override_alpha2("World Climbing Series Comunidad de Madrid 2026") == "ES"
+        assert override_alpha2("IFSC World Cup Innsbruck 2025") is None
 
 
 # ---------------------------------------------------------------------------

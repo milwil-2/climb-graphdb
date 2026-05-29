@@ -56,14 +56,24 @@ Idempotency
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 import typer
+from neo4j.spatial import WGS84Point
 
 from climber_network import vocab
-from climber_network.geo.geocode import GeoNamesIndex, GeoPoint, extract_city
+from climber_network.geo.geocode import (
+    GeoNamesIndex,
+    GeoPoint,
+    alpha2_to_alpha3,
+    extract_city,
+    norm_city,
+    override_alpha2,
+    parse_ioc_alpha2,
+    resolve_event,
+)
 
 app = typer.Typer(add_completion=False, help="L2 geography build: Event names → places.")
 
@@ -85,6 +95,10 @@ class GraphClientLike(Protocol):
         tgt_id: str,
         props: dict[str, Any] | None = None,
     ) -> None: ...
+
+    def merge_nodes(self, label: str, rows: list[dict[str, Any]]) -> None: ...
+
+    def merge_rels(self, rel_type: str, rows: list[dict[str, Any]]) -> None: ...
 
     def run_read(self, cypher: str, **params: Any) -> list[dict[str, Any]]: ...
 
@@ -253,6 +267,86 @@ CONFIDENCE_COUNTRY = 0.2
 
 
 # ---------------------------------------------------------------------------
+# In-memory accumulator — collects rows before the batched flush.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _GeoAccumulator:
+    """Collects deduped node and edge rows for a single batched flush.
+
+    Nodes are keyed by ``(label, node_id)``; edges by ``(rel_type, src_id, tgt_id)``.
+    Using dicts as the backing store means MERGE semantics are preserved: the
+    last props written for a given key win, matching what MERGE + SET n += …
+    would do in Neo4j.
+    """
+
+    # label → {node_id: props}
+    nodes: dict[str, dict[str, dict[str, Any]]] = field(
+        default_factory=lambda: {
+            "Country": {},
+            "TimeZone": {},
+            "Venue": {},
+            "City": {},
+        }
+    )
+    # rel_type → {(src_id, tgt_id): props | None}
+    rels: dict[str, dict[tuple[str, str], dict[str, Any] | None]] = field(
+        default_factory=lambda: {
+            "HELD_AT": {},
+            "IN_CITY": {},
+            "IN_COUNTRY": {},
+            "IN_TIMEZONE": {},
+            "REPRESENTS": {},
+            "BASED_IN": {},
+        }
+    )
+
+    def add_node(self, label: str, node_id: str, props: dict[str, Any]) -> None:
+        self.nodes[label][node_id] = props
+
+    def add_rel(
+        self,
+        src_id: str,
+        rel_type: str,
+        tgt_id: str,
+        props: dict[str, Any] | None = None,
+    ) -> None:
+        self.rels[rel_type][(src_id, tgt_id)] = props
+
+    def flush(self, client: GraphClientLike) -> None:
+        """Write all accumulated rows to *client* — nodes first, then edges."""
+        # Nodes: Country → TimeZone → Venue → City (all before any edges so
+        # merge_rels can MATCH them via the :Entity id index).
+        for label in ("Country", "TimeZone", "Venue", "City"):
+            node_map = self.nodes[label]
+            if node_map:
+                node_rows: list[dict[str, Any]] = [
+                    {"id": nid, "props": props} for nid, props in node_map.items()
+                ]
+                client.merge_nodes(label, node_rows)
+
+        # Edges: order doesn't affect correctness (endpoints already written
+        # above), but keeping it consistent with the node-type ordering helps
+        # readability of debug output.
+        for rel_type in (
+            "HELD_AT",
+            "IN_CITY",
+            "IN_COUNTRY",
+            "IN_TIMEZONE",
+            "REPRESENTS",
+            "BASED_IN",
+        ):
+            rel_map = self.rels[rel_type]
+            if rel_map:
+                rel_rows: list[dict[str, Any]] = [
+                    {"src_id": src, "tgt_id": tgt, "props": props}
+                    for (src, tgt), props in rel_map.items()
+                ]
+                client.merge_rels(rel_type, rel_rows)
+
+
+# ---------------------------------------------------------------------------
 # Core build logic — pure with respect to the injected client + inputs.
 # ---------------------------------------------------------------------------
 
@@ -266,40 +360,16 @@ def _venue_point_props(point: GeoPoint) -> dict[str, Any]:
     }
 
 
-class _Point:
-    """A neo4j ``point({longitude, latitude})`` value object.
+def _point(longitude: float, latitude: float) -> WGS84Point:
+    """Build a neo4j WGS-84 ``point`` value for a Venue ``location`` prop.
 
-    The real :class:`~climber_network.graph.client.GraphClient` passes node
-    props straight to the driver as a parameter map, where a ``neo4j.spatial``
-    point would be the canonical type. To keep this module driver-agnostic (and
-    testable without a live driver) we carry longitude / latitude in a tiny,
-    comparable value object whose repr matches the Cypher constructor. Tests can
-    assert on ``.longitude`` / ``.latitude`` directly.
+    The :class:`GraphClient` passes node props straight to the driver as a
+    parameter map. ``neo4j.spatial.WGS84Point`` is the *canonical*, Bolt-
+    serializable point type — importing the value class needs no live driver,
+    so this stays testable offline, and tests assert on ``.longitude`` /
+    ``.latitude`` (native accessors on a 2-D WGS84Point).
     """
-
-    __slots__ = ("longitude", "latitude")
-
-    def __init__(self, longitude: float, latitude: float) -> None:
-        self.longitude = longitude
-        self.latitude = latitude
-
-    def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, _Point)
-            and other.longitude == self.longitude
-            and other.latitude == self.latitude
-        )
-
-    def __hash__(self) -> int:
-        return hash((self.longitude, self.latitude))
-
-    def __repr__(self) -> str:
-        return f"point({{longitude: {self.longitude}, latitude: {self.latitude}}})"
-
-
-def _point(longitude: float, latitude: float) -> _Point:
-    """Build a neo4j-style ``point({longitude, latitude})`` value."""
-    return _Point(longitude, latitude)
+    return WGS84Point((longitude, latitude))
 
 
 def build_geo(
@@ -324,98 +394,147 @@ def build_geo(
     cache = cache if cache is not None else ResolutionCache(None)
     centroids = centroids or {}
 
-    # Track which Country / TimeZone ids we've already MERGEd so the report counts
-    # are logical (dedup-aware), matching the L1 mirror's convention.
-    seen_countries: set[str] = set()
-    seen_timezones: set[str] = set()
+    acc = _GeoAccumulator()
 
     def _ensure_country(iso3: str) -> str:
         ctry_id = vocab.ctry(iso3)
-        if iso3 not in seen_countries:
-            client.merge_node("Country", ctry_id, {"iso3": iso3})
-            seen_countries.add(iso3)
-            report.node_countries += 1
+        acc.add_node("Country", ctry_id, {"iso3": iso3})
         return ctry_id
 
     def _ensure_timezone(iana: str) -> str:
         tz_id = vocab.tz(iana)
-        if iana not in seen_timezones:
-            client.merge_node("TimeZone", tz_id, {"iana": iana})
-            seen_timezones.add(iana)
-            report.node_timezones += 1
+        acc.add_node("TimeZone", tz_id, {"iana": iana})
         return tz_id
 
     events = client.run_read(EVENT_QUERY)
     report.src_events = len(events)
 
-    for ev in events:
-        name = ev.get("name")
-        country = ev.get("country")
-        iso3 = str(country).strip().upper() if country else None
+    # The upstream events table has NO country for any row, so the host country
+    # must come from the event name. Most names carry a parenthesised IOC code
+    # ("... Chamonix (FRA) 2022"); the rest (newer series names) do not. Build a
+    # city → alpha-2 map from the coded events and use it to backfill the bare
+    # ones (e.g. "World Climbing Series Innsbruck" inherits AT).
+    backfill = _build_country_backfill(events)
 
-        point = _resolve(name, iso3, geonames, cache, report)
+    for ev in events:
+        event_name = str(ev.get("name") or "")
+        # Prefer the event's own parens code; else inherit from a same-named
+        # event that had one; else fall back to a curated override's pin.
+        alpha2 = (
+            parse_ioc_alpha2(event_name)
+            or backfill.get(_backfill_key(event_name))
+            or override_alpha2(event_name)
+        )
+
+        point = _resolve(event_name, alpha2, geonames, cache, report)
+        iso3 = alpha2_to_alpha3(alpha2)
 
         if point is not None:
-            _emit_resolved(client, report, ev, point, iso3, _ensure_country, _ensure_timezone)
+            _emit_resolved(acc, ev, point, iso3, _ensure_country, _ensure_timezone)
             report.resolved_events += 1
         elif iso3:
-            _emit_country_fallback(client, report, ev, iso3, centroids, _ensure_country)
+            _emit_country_fallback(acc, ev, iso3, centroids, _ensure_country)
             report.fallback_events += 1
         else:
             # No city and no country → nothing to anchor the event to.
             report.skipped_events += 1
 
-    _emit_athletes(client, report, seen_countries, _ensure_country)
+    athletes = client.run_read(ATHLETE_QUERY)
+    _emit_athletes_from_rows(acc, report, athletes, _ensure_country)
+
+    # --- Flush all accumulated rows in a single pass (nodes then edges) ------
+    # Set report counts from deduped accumulator sizes — matches how
+    # sync/pg_to_neo4j.py sets report counts from batch lengths.
+    report.node_countries = len(acc.nodes["Country"])
+    report.node_timezones = len(acc.nodes["TimeZone"])
+    report.node_venues = len(acc.nodes["Venue"])
+    report.node_cities = len(acc.nodes["City"])
+
+    report.edge_held_at = len(acc.rels["HELD_AT"])
+    report.edge_in_city = len(acc.rels["IN_CITY"])
+    report.edge_in_country = len(acc.rels["IN_COUNTRY"])
+    report.edge_in_timezone = len(acc.rels["IN_TIMEZONE"])
+    report.edge_represents = len(acc.rels["REPRESENTS"])
+    report.edge_based_in = len(acc.rels["BASED_IN"])
+
+    acc.flush(client)
 
     cache.flush()
     return report
 
 
+def _backfill_key(event_name: str) -> str:
+    """Normalised city key used by the country-backfill map (accent/case-fold)."""
+    return norm_city(extract_city(event_name, None) or "")
+
+
+def _build_country_backfill(events: list[dict[str, Any]]) -> dict[str, str]:
+    """Map ``norm_city(name) → alpha-2`` from events that carry a parens IOC code.
+
+    Lets events whose name lacks an explicit country (e.g. "World Climbing
+    Series Innsbruck 2026") inherit the host country from a same-named coded
+    event ("... Innsbruck (AUT) ..."). First definite code per city wins.
+    """
+    out: dict[str, str] = {}
+    for ev in events:
+        event_name = str(ev.get("name") or "")
+        alpha2 = parse_ioc_alpha2(event_name)
+        if alpha2 is None:
+            continue
+        key = _backfill_key(event_name)
+        if key and key not in out:
+            out[key] = alpha2
+    return out
+
+
 def _resolve(
-    name: object,
-    iso3: str | None,
+    event_name: str,
+    alpha2: str | None,
     geonames: GeoNamesIndex,
     cache: ResolutionCache,
     report: GeoReport,
 ) -> GeoPoint | None:
-    """Resolve an event name to a GeoPoint, consulting/populating the cache."""
-    event_name = str(name) if name is not None else ""
-    city = extract_city(event_name, iso3)
-    if not city:
-        return None
+    """Resolve an event name to a :class:`GeoPoint` (or ``None``), cached.
 
-    cache_key = ResolutionCache.key(city, iso3)
+    *alpha2* is the resolved host-country hint. The full end-to-end resolution
+    (extraction → override → constrained lookup) lives in
+    :func:`climber_network.geo.geocode.resolve_event`; this wrapper only adds the
+    deterministic file-backed cache, keyed by ``(event_name, alpha2)`` so the
+    resolution is fully determined by the cache key.
+    """
+    cache_key = ResolutionCache.key(event_name, alpha2)
     cached = cache.get(cache_key)
     if cached is not None:
         report.cache_hits += 1
         return cached[1]
 
-    point = geonames.lookup(city, iso3)
-    cache.put(cache_key, point)
-    return point
+    resolution = resolve_event(event_name, geonames, alpha2=alpha2)
+    cache.put(cache_key, resolution.point)
+    return resolution.point
 
 
 def _emit_resolved(
-    client: GraphClientLike,
-    report: GeoReport,
+    acc: _GeoAccumulator,
     ev: dict[str, Any],
     point: GeoPoint,
     iso3: str | None,
     ensure_country: Any,
     ensure_timezone: Any,
 ) -> None:
-    """MERGE Venue/City/Country/TimeZone + edges for a city-resolved event."""
-    evt_id = vocab.evt(ev["id"])
+    """Accumulate Venue/City/Country/TimeZone + edges for a city-resolved event."""
+    # ``EVENT_QUERY`` returns the Event node's ``id`` property, which is ALREADY
+    # the full vocab id (e.g. "evt:4"). Do NOT re-wrap with vocab.evt() — that
+    # would double-prefix to "evt:evt:4", silently matching no node so the
+    # HELD_AT MERGE writes nothing.
+    evt_id = ev["id"]
     ven_id = vocab.ven(vocab.slug(point.name))
 
-    client.merge_node("Venue", ven_id, _venue_point_props(point))
-    report.node_venues += 1
-    client.merge_rel(evt_id, "HELD_AT", ven_id)
-    report.edge_held_at += 1
+    acc.add_node("Venue", ven_id, _venue_point_props(point))
+    acc.add_rel(evt_id, "HELD_AT", ven_id)
 
     # City.
     city_id = vocab.city(point.geonameid)
-    client.merge_node(
+    acc.add_node(
         "City",
         city_id,
         {
@@ -424,37 +543,33 @@ def _emit_resolved(
             "location": _point(point.lon, point.lat),
         },
     )
-    report.node_cities += 1
-    client.merge_rel(ven_id, "IN_CITY", city_id)
-    report.edge_in_city += 1
+    acc.add_rel(ven_id, "IN_CITY", city_id)
 
     # Country (from the event's ISO3) + IN_COUNTRY from the city.
     if iso3:
         ctry_id = ensure_country(iso3)
-        client.merge_rel(city_id, "IN_COUNTRY", ctry_id)
-        report.edge_in_country += 1
+        acc.add_rel(city_id, "IN_COUNTRY", ctry_id)
 
     # TimeZone.
     if point.timezone:
         tz_id = ensure_timezone(point.timezone)
-        client.merge_rel(ven_id, "IN_TIMEZONE", tz_id)
-        report.edge_in_timezone += 1
+        acc.add_rel(ven_id, "IN_TIMEZONE", tz_id)
 
 
 def _emit_country_fallback(
-    client: GraphClientLike,
-    report: GeoReport,
+    acc: _GeoAccumulator,
     ev: dict[str, Any],
     iso3: str,
     centroids: dict[str, tuple[float, float]],
     ensure_country: Any,
 ) -> None:
-    """MERGE a low-confidence country-centroid Venue + HELD_AT / IN_COUNTRY.
+    """Accumulate a low-confidence country-centroid Venue + HELD_AT / IN_COUNTRY.
 
     The fallback Venue is keyed at the country level (``ven:country-{iso3}``) so
     every unresolved event in the same country shares one placeholder Venue.
     """
-    evt_id = vocab.evt(ev["id"])
+    # ev["id"] is already the full node id (see _emit_resolved) — do not re-wrap.
+    evt_id = ev["id"]
     ven_id = vocab.ven(f"country-{iso3.lower()}")
 
     props: dict[str, Any] = {
@@ -466,47 +581,41 @@ def _emit_country_fallback(
         lon, lat = centroid
         props["location"] = _point(lon, lat)
 
-    client.merge_node("Venue", ven_id, props)
-    report.node_venues += 1
-    client.merge_rel(evt_id, "HELD_AT", ven_id)
-    report.edge_held_at += 1
+    acc.add_node("Venue", ven_id, props)
+    acc.add_rel(evt_id, "HELD_AT", ven_id)
 
     ctry_id = ensure_country(iso3)
     # The centroid Venue sits in the country directly (no City to bridge).
-    client.merge_rel(ven_id, "IN_COUNTRY", ctry_id)
-    report.edge_in_country += 1
+    acc.add_rel(ven_id, "IN_COUNTRY", ctry_id)
 
 
-def _emit_athletes(
-    client: GraphClientLike,
+def _emit_athletes_from_rows(
+    acc: _GeoAccumulator,
     report: GeoReport,
-    seen_countries: set[str],
+    athletes: list[dict[str, Any]],
     ensure_country: Any,
 ) -> None:
-    """MERGE REPRESENTS + BASED_IN (nationality proxy) from Athlete nodes."""
-    athletes = client.run_read(ATHLETE_QUERY)
-    report.src_athletes = len(athletes)
+    """Accumulate REPRESENTS + BASED_IN (nationality proxy) rows into *acc*.
 
-    # Avoid emitting the same edge twice for athletes sharing a nationality.
-    represents_seen: set[tuple[str, str]] = set()
+    Deduplication is implicit — ``acc.add_rel`` keyed on ``(ath_id, ctry_id)``
+    so duplicate athlete–country pairs (from a re-run or a shared nationality)
+    collapse to a single edge row, matching MERGE semantics.
+    """
+    report.src_athletes = len(athletes)
 
     for a in athletes:
         nationality = a.get("nationality")
         if not nationality:
             continue
         iso3 = str(nationality).strip().upper()
-        ath_id = vocab.ath(a["id"])
+        # ATHLETE_QUERY returns the Athlete node's full id ("ath:5"); use it
+        # directly. Re-wrapping with vocab.ath() would double-prefix and the
+        # REPRESENTS / BASED_IN MERGEs would silently match no node.
+        ath_id = a["id"]
         ctry_id = ensure_country(iso3)
 
-        key = (ath_id, ctry_id)
-        if key in represents_seen:
-            continue
-        represents_seen.add(key)
-
-        client.merge_rel(ath_id, "REPRESENTS", ctry_id)
-        report.edge_represents += 1
-        client.merge_rel(ath_id, "BASED_IN", ctry_id, {"source": NATIONALITY_PROXY})
-        report.edge_based_in += 1
+        acc.add_rel(ath_id, "REPRESENTS", ctry_id)
+        acc.add_rel(ath_id, "BASED_IN", ctry_id, {"source": NATIONALITY_PROXY})
 
 
 # ---------------------------------------------------------------------------

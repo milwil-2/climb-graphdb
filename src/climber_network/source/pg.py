@@ -149,6 +149,15 @@ def make_engine(url: str | None = None) -> Engine:
         # Supabase requires TLS; sslmode is a libpq/psycopg connect-arg.
         if "sslmode" not in parsed.query:
             connect_args["sslmode"] = "require"
+        # The sync layer reads every row up front, then performs a long series of
+        # Neo4j writes while this connection sits IDLE. Supabase's pooler drops
+        # idle sockets (see CLAUDE.md), which otherwise surfaces as an
+        # "SSL SYSCALL error: Operation timed out" at session teardown. TCP
+        # keepalives keep the idle socket alive for the duration of the writes.
+        connect_args.setdefault("keepalives", 1)
+        connect_args.setdefault("keepalives_idle", 30)
+        connect_args.setdefault("keepalives_interval", 10)
+        connect_args.setdefault("keepalives_count", 5)
     return create_engine(parsed, pool_pre_ping=True, connect_args=connect_args)
 
 

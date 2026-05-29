@@ -63,6 +63,14 @@ CREATE CONSTRAINT extractionrun_id IF NOT EXISTS
 
 // --- Additional indexes --------------------------------------------------
 
+// Shared :Entity label index — every node also carries the :Entity label
+// (stamped by GraphClient.merge_node[s]). Relationship MERGEs match endpoints
+// by id WITHOUT knowing their specific label, so they rely on THIS index;
+// a per-label id index can't serve an unlabeled / cross-label id lookup, which
+// would otherwise force a full node scan per row (catastrophic at 30k+ edges).
+CREATE INDEX entity_id IF NOT EXISTS
+  FOR (n:Entity) ON (n.id);
+
 // Full-text / name searches on athletes
 CREATE INDEX athlete_name IF NOT EXISTS
   FOR (n:Athlete) ON (n.name);

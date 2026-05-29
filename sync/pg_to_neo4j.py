@@ -68,6 +68,10 @@ class GraphWriter(Protocol):
         props: dict[str, Any] | None = None,
     ) -> None: ...
 
+    def merge_nodes(self, label: str, rows: list[dict[str, Any]]) -> None: ...
+
+    def merge_rels(self, rel_type: str, rows: list[dict[str, Any]]) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Discipline vocabulary — codes mirror climbing-elo (PRD §8.1: L|B|S|BL).
@@ -169,6 +173,14 @@ def sync_graph(writer: GraphWriter, session: pg.Session) -> SyncReport:
     results = list(pg.iter_rows(session, pg.Result))
     ratings = list(pg.iter_rows(session, pg.Rating))
 
+    # All source rows are now fully materialized in memory. Detach them from the
+    # Session (keeping their loaded values) and end the read transaction so the
+    # upstream Postgres connection is NOT held idle-in-transaction during the
+    # long Neo4j write phase below — Supabase terminates idle sessions, which
+    # otherwise surfaces as "SSL SYSCALL error: Operation timed out" mid-run.
+    session.expunge_all()
+    session.rollback()
+
     report.src_athletes = len(athletes)
     report.src_events = len(events)
     report.src_rounds = len(rounds)
@@ -176,74 +188,89 @@ def sync_graph(writer: GraphWriter, session: pg.Session) -> SyncReport:
     report.src_ratings = len(ratings)
 
     # --- Athlete nodes -----------------------------------------------------
+    athlete_rows: list[dict[str, Any]] = []
     for a in athletes:
         assert isinstance(a, pg.Athlete)
-        writer.merge_node(
-            "Athlete",
-            vocab.ath(a.id),
+        athlete_rows.append(
             {
-                "name": a.name,
-                "year_of_birth": a.year_of_birth,
-                "nationality": a.nationality,
-                "gender": a.gender,
-                "photo_url": a.photo_url,
-                "height_cm": a.height_cm,
-                "weight_kg": a.weight_kg,
-                "wingspan_cm": a.wingspan_cm,
-                "retired_at": _iso(a.retired_at),
-            },
+                "id": vocab.ath(a.id),
+                "props": {
+                    "name": a.name,
+                    "year_of_birth": a.year_of_birth,
+                    "nationality": a.nationality,
+                    "gender": a.gender,
+                    "photo_url": a.photo_url,
+                    "height_cm": a.height_cm,
+                    "weight_kg": a.weight_kg,
+                    "wingspan_cm": a.wingspan_cm,
+                    "retired_at": _iso(a.retired_at),
+                },
+            }
         )
-        report.node_athletes += 1
+    writer.merge_nodes("Athlete", athlete_rows)
+    report.node_athletes = len(athlete_rows)
 
     # --- Discipline + Event nodes (and IN_DISCIPLINE edges) ----------------
     seen_disciplines: set[str] = set()
+    discipline_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    in_discipline_rows: list[dict[str, Any]] = []
     for e in events:
         assert isinstance(e, pg.Event)
         code = e.discipline
         if code not in seen_disciplines:
-            writer.merge_node(
-                "Discipline",
-                vocab.disc(code),
-                {"code": code, "name": DISCIPLINE_NAMES.get(code, code)},
+            discipline_rows.append(
+                {
+                    "id": vocab.disc(code),
+                    "props": {"code": code, "name": DISCIPLINE_NAMES.get(code, code)},
+                }
             )
             seen_disciplines.add(code)
-            report.node_disciplines += 1
 
-        writer.merge_node(
-            "Event",
-            vocab.evt(e.id),
+        event_rows.append(
             {
-                "name": e.name,
-                "tier": e.tier,
-                "country": e.country,
-                "season": e.season,
-                "start_date": _iso(e.start_date),
-                "discipline": code,
-            },
+                "id": vocab.evt(e.id),
+                "props": {
+                    "name": e.name,
+                    "tier": e.tier,
+                    "country": e.country,
+                    "season": e.season,
+                    "start_date": _iso(e.start_date),
+                    "discipline": code,
+                },
+            }
         )
-        report.node_events += 1
-
-        writer.merge_rel(vocab.evt(e.id), "IN_DISCIPLINE", vocab.disc(code))
-        report.edge_in_discipline += 1
+        in_discipline_rows.append({"src_id": vocab.evt(e.id), "tgt_id": vocab.disc(code)})
+    writer.merge_nodes("Discipline", discipline_rows)
+    writer.merge_nodes("Event", event_rows)
+    writer.merge_rels("IN_DISCIPLINE", in_discipline_rows)
+    report.node_disciplines = len(discipline_rows)
+    report.node_events = len(event_rows)
+    report.edge_in_discipline = len(in_discipline_rows)
 
     # --- Round nodes (and OF_EVENT edges) ----------------------------------
     rounds_by_id: dict[int, pg.Round] = {}
+    round_rows: list[dict[str, Any]] = []
+    of_event_rows: list[dict[str, Any]] = []
     for r in rounds:
         assert isinstance(r, pg.Round)
         rounds_by_id[r.id] = r
-        writer.merge_node(
-            "Round",
-            vocab.rnd(r.id),
+        round_rows.append(
             {
-                "round_type": r.round_type,
-                "gender": r.gender,
-                "athlete_count": r.athlete_count,
-                "event_id": r.event_id,
-            },
+                "id": vocab.rnd(r.id),
+                "props": {
+                    "round_type": r.round_type,
+                    "gender": r.gender,
+                    "athlete_count": r.athlete_count,
+                    "event_id": r.event_id,
+                },
+            }
         )
-        report.node_rounds += 1
-        writer.merge_rel(vocab.rnd(r.id), "OF_EVENT", vocab.evt(r.event_id))
-        report.edge_of_event += 1
+        of_event_rows.append({"src_id": vocab.rnd(r.id), "tgt_id": vocab.evt(r.event_id)})
+    writer.merge_nodes("Round", round_rows)
+    writer.merge_rels("OF_EVENT", of_event_rows)
+    report.node_rounds = len(round_rows)
+    report.edge_of_event = len(of_event_rows)
 
     # Event start_date lookup for FACED first/last dates.
     event_date: dict[int, date | None] = {e.id: e.start_date for e in events}  # type: ignore[attr-defined]
@@ -253,50 +280,61 @@ def sync_graph(writer: GraphWriter, session: pg.Session) -> SyncReport:
     # Group results by round for FACED aggregation; skip DNS (athlete did not
     # start) — they never competed, so no Performance / head-to-head is created.
     results_by_round: dict[int, list[pg.Result]] = defaultdict(list)
+    performance_rows: list[dict[str, Any]] = []
+    competed_in_rows: list[dict[str, Any]] = []
+    of_round_rows: list[dict[str, Any]] = []
     for res in results:
         assert isinstance(res, pg.Result)
         if res.dns:
             report.filtered["performance_skipped_dns"] += 1
             continue
         perf_id = vocab.perf(vocab.rnd(res.round_id), vocab.ath(res.athlete_id))
-        writer.merge_node(
-            "Performance",
-            perf_id,
+        performance_rows.append(
             {
-                "rank": res.rank,
-                "score_normalized": res.score_normalized,
-                "dnf": bool(res.dnf),
-                "dns": bool(res.dns),
-            },
+                "id": perf_id,
+                "props": {
+                    "rank": res.rank,
+                    "score_normalized": res.score_normalized,
+                    "dnf": bool(res.dnf),
+                    "dns": bool(res.dns),
+                },
+            }
         )
-        report.node_performances += 1
-
-        writer.merge_rel(vocab.ath(res.athlete_id), "COMPETED_IN", perf_id)
-        report.edge_competed_in += 1
-        writer.merge_rel(perf_id, "OF_ROUND", vocab.rnd(res.round_id))
-        report.edge_of_round += 1
-
+        competed_in_rows.append({"src_id": vocab.ath(res.athlete_id), "tgt_id": perf_id})
+        of_round_rows.append({"src_id": perf_id, "tgt_id": vocab.rnd(res.round_id)})
         results_by_round[res.round_id].append(res)
 
+    writer.merge_nodes("Performance", performance_rows)
+    writer.merge_rels("COMPETED_IN", competed_in_rows)
+    writer.merge_rels("OF_ROUND", of_round_rows)
+    report.node_performances = len(performance_rows)
+    report.edge_competed_in = len(competed_in_rows)
+    report.edge_of_round = len(of_round_rows)
+
     # --- Rating nodes + HAS_RATING -----------------------------------------
+    rating_rows: list[dict[str, Any]] = []
+    has_rating_rows: list[dict[str, Any]] = []
     for rt in ratings:
         assert isinstance(rt, pg.Rating)
         rating_id = vocab.rat(vocab.ath(rt.athlete_id), rt.discipline)
-        writer.merge_node(
-            "Rating",
-            rating_id,
+        rating_rows.append(
             {
-                "discipline": rt.discipline,
-                "mu": rt.mu,
-                "sigma": rt.sigma,
-                "n_events": rt.n_events,
-                "last_event_at": _iso(rt.last_event_at),
-                "provisional": bool(rt.provisional),
-            },
+                "id": rating_id,
+                "props": {
+                    "discipline": rt.discipline,
+                    "mu": rt.mu,
+                    "sigma": rt.sigma,
+                    "n_events": rt.n_events,
+                    "last_event_at": _iso(rt.last_event_at),
+                    "provisional": bool(rt.provisional),
+                },
+            }
         )
-        report.node_ratings += 1
-        writer.merge_rel(vocab.ath(rt.athlete_id), "HAS_RATING", rating_id)
-        report.edge_has_rating += 1
+        has_rating_rows.append({"src_id": vocab.ath(rt.athlete_id), "tgt_id": rating_id})
+    writer.merge_nodes("Rating", rating_rows)
+    writer.merge_rels("HAS_RATING", has_rating_rows)
+    report.node_ratings = len(rating_rows)
+    report.edge_has_rating = len(has_rating_rows)
 
     # --- FACED (final/semi only), aggregated per ordered athlete pair ------
     _emit_faced(writer, report, results_by_round, rounds_by_id, round_event, event_date)
@@ -341,19 +379,22 @@ def _emit_faced(
                 if entry.last_date is None or evt_date > entry.last_date:
                     entry.last_date = evt_date
 
+    faced_rows: list[dict[str, Any]] = []
     for (a_id, b_id), entry in agg.items():
-        writer.merge_rel(
-            vocab.ath(a_id),
-            "FACED",
-            vocab.ath(b_id),
+        faced_rows.append(
             {
-                "count": entry.count,
-                "round_ids": sorted(entry.round_ids),
-                "first_date": _iso(entry.first_date),
-                "last_date": _iso(entry.last_date),
-            },
+                "src_id": vocab.ath(a_id),
+                "tgt_id": vocab.ath(b_id),
+                "props": {
+                    "count": entry.count,
+                    "round_ids": sorted(entry.round_ids),
+                    "first_date": _iso(entry.first_date),
+                    "last_date": _iso(entry.last_date),
+                },
+            }
         )
-        report.edge_faced += 1
+    writer.merge_rels("FACED", faced_rows)
+    report.edge_faced = len(faced_rows)
 
 
 # ---------------------------------------------------------------------------

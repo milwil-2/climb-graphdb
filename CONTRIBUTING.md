@@ -36,7 +36,8 @@ git fetch origin && git merge origin/main # (or rebase your own branch)
 git push -u origin feat/12-llm-extraction
 gh pr create --base main                  # body: "Closes #12" + the checklist
 
-# 6. CI runs. Get 1 approving review. Squash-merge. Delete the branch.
+# 6. CI runs. A Claude review verifies the diff; then it auto-merges on green CI.
+gh pr merge --auto --squash      # lands the moment required checks pass; branch auto-deletes
 ```
 
 Link the PR to its issue with **`Closes #<n>`** so the issue auto-closes on merge.
@@ -62,17 +63,31 @@ uv run pre-commit install
 Add/extend tests with every change — see `tests/conftest.py` and use the
 `/gen-test` skill to scaffold a test that matches our conventions.
 
-## Branch protection on `main`
+## Merge policy & branch protection on `main`
 
-Enforced by GitHub — you cannot bypass these via a normal push:
+**The hard gate is CI**, enforced by GitHub — you cannot bypass these via a normal push:
 
-- PR required; **≥1 approving review**; stale approvals dismissed on new commits.
-- All **conversations resolved**.
+- **PR required** (no direct pushes to `main`).
 - Required checks green: **`quality`** and **`gitleaks`**.
+- All **conversations resolved**.
 - Branch **up to date** with `main` before merge.
 - **No force-pushes, no deletions** of `main`.
 
-(Repo admins can override in a pinch via `gh pr merge --admin`; use sparingly.)
+**Review is by Claude, not a required human approval** (0 approvals are
+*required* by the platform). The expectation: every PR is verified with a
+**Claude review — `/security-review` + `/code-review`** — from a maintainer's
+Claude Code session *before* it's merged. Those reviews have already caught real
+bugs CI didn't (a DOM XSS, a silent `n=0` correlation). Once the diff is
+verified and CI is green, land it with GitHub **auto-merge**:
+
+```bash
+gh pr merge <n> --auto --squash    # merges automatically when checks pass
+```
+
+> Because human approval isn't *enforced*, CI is the only thing the platform
+> guarantees. **Always run the Claude review before enabling auto-merge** —
+> especially for external/contributor PRs. A human can still approve normally,
+> and admins can `gh pr merge --admin` in a pinch.
 
 ## Working with Claude Code
 
@@ -80,8 +95,9 @@ Enforced by GitHub — you cannot bypass these via a normal push:
   personal overrides in **`.claude/settings.local.json`** (gitignored).
 - Let Claude keep its defaults: **branch first, never push to `main`, commit/push
   only when asked.** Don't configure auto-push.
-- Run **`/security-review`** on each PR's diff before merging — it has already
-  caught real bugs that unit tests missed.
+- A maintainer's Claude session **reviews each PR** (`/security-review` +
+  `/code-review`) and then **completes the merge** via auto-merge — see
+  *Merge policy* above. Don't enable auto-merge on a PR you haven't reviewed.
 
 ## Security & isolation
 

@@ -35,3 +35,9 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# ── Local-only proprietary planning / agent docs (never commit) ───────────────
+PRD.md
+PLAN.md
+IMPLEMENTATION_PLAN.md
+CLAUDE.md

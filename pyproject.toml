@@ -56,6 +56,13 @@ disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Deselect live-external-service tests by default so CI never depends on
+# third-party uptime (Groq, live Neo4j/Supabase). Run them explicitly with:
+#   uv run pytest -m network
+addopts = "-m 'not network'"
+markers = [
+    "network: tests that hit live external services (Groq, live Neo4j/Supabase); deselected by default",
+]
 
 [tool.coverage.run]
 source = ["src"]

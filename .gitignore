@@ -33,6 +33,8 @@ dist/
 
 # ── Claude Code: personal overrides (shared settings.json IS committed) ───────
 .claude/settings.local.json
+# Agent worktrees (isolation: "worktree") are ephemeral scratch — never committed.
+/.claude/worktrees/
 
 # ── OS / editor ───────────────────────────────────────────────────────────────
 .DS_Store

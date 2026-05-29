@@ -69,3 +69,6 @@ source = ["src"]
 omit = [
     "src/climber_network/graph/client.py",  # IO-heavy Neo4j driver; tested via integration
 ]
+
+[tool.coverage.report]
+fail_under = 85

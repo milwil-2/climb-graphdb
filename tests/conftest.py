@@ -27,9 +27,28 @@ import os
 # These are dummy values: tests never hit a live database or graph. Using
 # setdefault means a real local .env still wins for the rare `-m network` run.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
-os.environ.setdefault("NEO4J_USER", "test-instance-id")
-os.environ.setdefault("NEO4J_PASSWORD", "test-password")
+
+# Dummy Neo4j creds — the fallback when no real .env is present. They point at a
+# dead localhost, so a `-m network` test that reaches a live driver with these
+# would error on connect; ``has_live_neo4j_creds`` lets such tests skip cleanly
+# instead (see the ``live_neo4j`` fixture below).
+_DUMMY_NEO4J = {
+    "NEO4J_URI": "bolt://localhost:7687",
+    "NEO4J_USER": "test-instance-id",
+    "NEO4J_PASSWORD": "test-password",
+}
+for _key, _val in _DUMMY_NEO4J.items():
+    os.environ.setdefault(_key, _val)
+
+
+def has_live_neo4j_creds() -> bool:
+    """True when NEO4J_* point at a real instance, not the dummy fallbacks.
+
+    A real local ``.env`` overrides the ``setdefault`` dummies above, so any
+    env var differing from its dummy value signals live credentials.
+    """
+    return any(os.environ.get(key) != val for key, val in _DUMMY_NEO4J.items())
+
 
 from collections.abc import Iterator  # noqa: E402
 from datetime import date  # noqa: E402
@@ -39,6 +58,18 @@ import pytest  # noqa: E402
 
 from climber_network.source import pg  # noqa: E402
 from climber_network.vocab import assert_label, assert_rel  # noqa: E402
+
+
+@pytest.fixture
+def live_neo4j() -> None:
+    """Skip a ``-m network`` test unless real NEO4J_* credentials are present.
+
+    Without a real ``.env`` the dummy fallbacks point at a dead localhost, so a
+    live driver call would error on connect; this skips cleanly instead.
+    """
+    if not has_live_neo4j_creds():
+        pytest.skip("no live NEO4J_* credentials (using dummy test defaults)")
+
 
 # ---------------------------------------------------------------------------
 # Fake graph writer — sync.GraphWriter shape (merge_node / merge_rel).

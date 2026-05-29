@@ -24,12 +24,14 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "graph_stats_response.json"
 
 
 @pytest.mark.network
-def test_live_graph_stats_matches_contract() -> None:
+def test_live_graph_stats_matches_contract(live_neo4j: None) -> None:
     """``graph_stats()`` against a live Neo4j returns the documented contract.
 
-    Requires real NEO4J_* env vars and a reachable instance. The live counts
-    are not asserted (they change); only the response shape is — matching the
-    checked-in fixture parsed offline elsewhere.
+    Requires real NEO4J_* env vars and a reachable instance. The ``live_neo4j``
+    fixture skips this cleanly when only the dummy test defaults are set, so
+    ``-m network`` runs without credentials instead of erroring on connect. The
+    live counts are not asserted (they change); only the response shape is —
+    matching the checked-in fixture parsed offline elsewhere.
     """
     expected_keys = set(json.loads(_FIXTURE.read_text()))
 

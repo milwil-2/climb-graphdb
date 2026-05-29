@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, rag
+from . import db, queries, rag
 
 # Load .env so the app works when run locally with `uvicorn api.index:app`
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -80,6 +80,59 @@ def ask(req: AskRequest) -> dict[str, Any]:
         return rag.ask(req.question)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# U1–U5 read endpoints (api.queries)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/athlete/{athlete_id}")
+def athlete_profile(athlete_id: str) -> dict[str, Any]:
+    """U4 — athlete props + ratings + recent events. 404 if the athlete is absent."""
+    profile = queries.athlete_profile(athlete_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Unknown athlete: {athlete_id}")
+    return profile
+
+
+@app.get("/athlete/{athlete_id}/neighborhood")
+def athlete_neighborhood(athlete_id: str, hops: int = 2) -> dict[str, Any]:
+    """U4 — bounded ``{nodes, edges}`` subgraph around the athlete. 404 if absent."""
+    neighborhood = queries.athlete_neighborhood(athlete_id, hops=hops)
+    if neighborhood is None:
+        raise HTTPException(status_code=404, detail=f"Unknown athlete: {athlete_id}")
+    return neighborhood
+
+
+@app.get("/athlete/{athlete_id}/timeline")
+def athlete_timeline(athlete_id: str) -> dict[str, Any]:
+    """U5 — merged chronological events + RestednessStates (+ optional signals)."""
+    timeline = queries.athlete_timeline(athlete_id)
+    if timeline is None:
+        raise HTTPException(status_code=404, detail=f"Unknown athlete: {athlete_id}")
+    return timeline
+
+
+@app.get("/head-to-head")
+def head_to_head(a: str, b: str) -> dict[str, Any]:
+    """U1 — the FACED aggregate between two athletes. 404 if either is absent."""
+    result = queries.head_to_head(a, b)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Unknown athlete(s): {a}, {b}")
+    return result
+
+
+@app.get("/venues/clusters")
+def venue_clusters() -> dict[str, Any]:
+    """U2 — venues ranked by repeated co-competition (distinct athletes / events)."""
+    return {"clusters": queries.venue_clusters()}
+
+
+@app.get("/insights/jetlagged-underperformers")
+def jetlagged_underperformers() -> dict[str, Any]:
+    """U3 — low-rested athletes who underperformed (residual > 0). Empty if no data."""
+    return {"rows": queries.jetlagged_underperformers()}
 
 
 # ---------------------------------------------------------------------------

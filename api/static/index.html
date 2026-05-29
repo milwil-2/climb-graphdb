@@ -163,11 +163,26 @@
 
     function render(data) {
       resultsEl.style.display = "block";
-      // Entities
-      const ents = (data.entities || [])
-        .map((en) => `${en.name} <span class="muted">(${en.id})</span>`)
-        .join(", ");
-      document.getElementById("entities").innerHTML = ents || "<span class='muted'>none</span>";
+      // Entities — built with DOM APIs + textContent (never innerHTML) so that
+      // graph-derived athlete names/ids can never inject markup (XSS-safe).
+      const entitiesEl = document.getElementById("entities");
+      entitiesEl.replaceChildren();
+      const entities = data.entities || [];
+      if (!entities.length) {
+        const none = document.createElement("span");
+        none.className = "muted";
+        none.textContent = "none";
+        entitiesEl.appendChild(none);
+      } else {
+        entities.forEach((en, i) => {
+          if (i > 0) entitiesEl.appendChild(document.createTextNode(", "));
+          entitiesEl.appendChild(document.createTextNode(en.name ?? ""));
+          const idSpan = document.createElement("span");
+          idSpan.className = "muted";
+          idSpan.textContent = ` (${en.id ?? ""})`;
+          entitiesEl.appendChild(idSpan);
+        });
+      }
       // Answer
       document.getElementById("answer").textContent = data.answer || "";
       const badge = document.getElementById("llm-badge");

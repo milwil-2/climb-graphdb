@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-fake-001",
+  "object": "chat.completion",
+  "created": 1716800000,
+  "model": "llama-3.1-8b-instant",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Ada has competed at the World Cup Innsbruck (Lead) held at Kletterzentrum Innsbruck and has faced Bea, whom she met twice."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 142,
+    "completion_tokens": 33,
+    "total_tokens": 175
+  }
+}

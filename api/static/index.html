@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Climber Network — Neighborhood Explorer</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --panel: #161b22;
+      --line: #2a313c;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #f78166;
+      --athlete: #f78166;
+      --event: #58a6ff;
+      --venue: #3fb950;
+      --rival: #d2a8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 18px; }
+    header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+    form { display: flex; gap: 8px; margin-bottom: 20px; }
+    input[type="text"] {
+      flex: 1;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 14px;
+    }
+    button {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #0e1116;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .card h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .answer { white-space: pre-wrap; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      margin-left: 8px;
+      background: var(--line);
+      color: var(--muted);
+    }
+    ul { margin: 0; padding-left: 18px; }
+    li { margin-bottom: 4px; font-size: 13px; }
+    .nodes { list-style: none; padding: 0; }
+    .nodes li { display: flex; align-items: center; gap: 8px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+    .type-athlete { background: var(--athlete); }
+    .type-event { background: var(--event); }
+    .type-venue { background: var(--venue); }
+    .type-rival { background: var(--rival); }
+    svg { width: 100%; height: 360px; display: block; }
+    .edge { stroke: var(--line); stroke-width: 1.5; }
+    .node-label { font-size: 10px; fill: var(--text); }
+    .error { color: var(--accent); }
+    .muted { color: var(--muted); font-size: 12px; }
+    .entities { margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Climber Network — Neighborhood Explorer</h1>
+    <p>Ask about a World-Cup climber; the answer is grounded in the knowledge graph.</p>
+  </header>
+  <main>
+    <form id="ask-form">
+      <input id="question" type="text" placeholder="e.g. Who has Janja Garnbret faced?" autocomplete="off" />
+      <button id="submit" type="submit">Ask</button>
+    </form>
+
+    <div id="status" class="muted"></div>
+
+    <div id="results" style="display:none">
+      <div class="entities card">
+        <h2>Resolved entities</h2>
+        <div id="entities"></div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <h2>Answer <span id="llm-badge" class="badge" style="display:none">graph-only</span></h2>
+          <div id="answer" class="answer"></div>
+        </div>
+        <div class="card">
+          <h2>Neighborhood</h2>
+          <svg id="graph" viewBox="0 0 400 360" preserveAspectRatio="xMidYMid meet"></svg>
+          <ul id="nodes" class="nodes"></ul>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const form = document.getElementById("ask-form");
+    const statusEl = document.getElementById("status");
+    const resultsEl = document.getElementById("results");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const question = document.getElementById("question").value.trim();
+      if (!question) return;
+      const btn = document.getElementById("submit");
+      btn.disabled = true;
+      statusEl.textContent = "Thinking…";
+      statusEl.className = "muted";
+      resultsEl.style.display = "none";
+      try {
+        const resp = await fetch("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        });
+        if (resp.status === 404) {
+          const body = await resp.json().catch(() => ({}));
+          statusEl.textContent = body.detail || "No matching athlete found.";
+          statusEl.className = "error";
+          return;
+        }
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const data = await resp.json();
+        render(data);
+        statusEl.textContent = "";
+      } catch (err) {
+        statusEl.textContent = "Request failed: " + err.message;
+        statusEl.className = "error";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    function render(data) {
+      resultsEl.style.display = "block";
+      // Entities
+      const ents = (data.entities || [])
+        .map((en) => `${en.name} <span class="muted">(${en.id})</span>`)
+        .join(", ");
+      document.getElementById("entities").innerHTML = ents || "<span class='muted'>none</span>";
+      // Answer
+      document.getElementById("answer").textContent = data.answer || "";
+      const badge = document.getElementById("llm-badge");
+      badge.style.display = data.used_llm ? "none" : "inline-block";
+      // Graph
+      const sg = data.subgraph || { nodes: [], edges: [] };
+      drawGraph(sg.nodes || [], sg.edges || []);
+      drawNodeList(sg.nodes || []);
+    }
+
+    function drawNodeList(nodes) {
+      const ul = document.getElementById("nodes");
+      ul.innerHTML = "";
+      nodes.forEach((n) => {
+        const li = document.createElement("li");
+        const dot = document.createElement("span");
+        dot.className = "dot type-" + n.type;
+        const label = document.createElement("span");
+        label.textContent = `${n.label} — ${n.type}`;
+        li.appendChild(dot);
+        li.appendChild(label);
+        ul.appendChild(li);
+      });
+    }
+
+    function drawGraph(nodes, edges) {
+      const svg = document.getElementById("graph");
+      svg.innerHTML = "";
+      if (!nodes.length) return;
+      const W = 400, H = 360, cx = W / 2, cy = H / 2;
+      // Athlete (type athlete) at center; everyone else on a ring.
+      const center = nodes.find((n) => n.type === "athlete") || nodes[0];
+      const ring = nodes.filter((n) => n !== center);
+      const pos = {};
+      pos[center.id] = { x: cx, y: cy };
+      ring.forEach((n, i) => {
+        const angle = (2 * Math.PI * i) / Math.max(ring.length, 1);
+        const r = 130;
+        pos[n.id] = { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+      });
+      // Edges
+      edges.forEach((e) => {
+        const a = pos[e.source], b = pos[e.target];
+        if (!a || !b) return;
+        const line = document.createElementNS(SVG_NS, "line");
+        line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+        line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+        line.setAttribute("class", "edge");
+        svg.appendChild(line);
+      });
+      // Nodes
+      const colors = { athlete: "#f78166", event: "#58a6ff", venue: "#3fb950", rival: "#d2a8ff" };
+      nodes.forEach((n) => {
+        const p = pos[n.id];
+        if (!p) return;
+        const c = document.createElementNS(SVG_NS, "circle");
+        c.setAttribute("cx", p.x); c.setAttribute("cy", p.y);
+        c.setAttribute("r", n === center ? 9 : 6);
+        c.setAttribute("fill", colors[n.type] || "#8b949e");
+        svg.appendChild(c);
+        const t = document.createElementNS(SVG_NS, "text");
+        t.setAttribute("x", p.x + 9);
+        t.setAttribute("y", p.y + 3);
+        t.setAttribute("class", "node-label");
+        t.textContent = n.label.length > 18 ? n.label.slice(0, 17) + "…" : n.label;
+        svg.appendChild(t);
+      });
+    }
+  </script>
+</body>
+</html>

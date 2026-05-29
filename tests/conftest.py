@@ -93,27 +93,46 @@ class FakeGraphClient:
 # ---------------------------------------------------------------------------
 
 
-class _FakeRecord:
+class _FakeCountRecord:
     def __init__(self, value: int) -> None:
         self._value = value
 
     def __getitem__(self, key: str) -> int:
-        # api.db only ever reads the "c" column from the count queries.
+        # The count queries only ever read the "c" column.
         return self._value
 
 
-class _FakeResult:
+class _FakeRowResult:
+    """Result wrapping seeded read rows: iterable + ``single()``-able."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return iter(self._rows)
+
+    def single(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
+
+class _FakeCountResult:
     def __init__(self, value: int) -> None:
         self._value = value
 
-    def single(self) -> _FakeRecord:
-        return _FakeRecord(self._value)
+    def single(self) -> _FakeCountRecord:
+        return _FakeCountRecord(self._value)
 
 
 class _FakeSession:
-    def __init__(self, nodes: int, relationships: int) -> None:
+    def __init__(
+        self,
+        nodes: int,
+        relationships: int,
+        read_results: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self._nodes = nodes
         self._relationships = relationships
+        self._read_results = read_results or {}
 
     def __enter__(self) -> _FakeSession:
         return self
@@ -121,25 +140,36 @@ class _FakeSession:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def run(self, cypher: str, **params: Any) -> _FakeResult:
-        # Distinguish the node-count query from the relationship-count query.
+    def run(self, cypher: str, **params: Any) -> Any:
+        # Seeded read queries (api.rag) take precedence, keyed by exact cypher.
+        if cypher in self._read_results:
+            return _FakeRowResult(self._read_results[cypher])
+        # Otherwise behave as a count query (graph_stats / health).
         value = self._relationships if "[r]" in cypher or "()-[" in cypher else self._nodes
-        return _FakeResult(value)
+        return _FakeCountResult(value)
 
 
 class FakeNeo4jDriver:
     """Stand-in for the live Neo4j driver used by ``api.db._get_driver``.
 
     Returns seeded node / relationship counts so ``graph_stats()`` and
-    ``health()`` can be exercised without a live database.
+    ``health()`` can be exercised without a live database. An optional
+    ``read_results`` map (exact-cypher -> rows) lets ``api.db.run_read`` based
+    callers (``api.rag``) be exercised offline too.
     """
 
-    def __init__(self, nodes: int = 0, relationships: int = 0) -> None:
+    def __init__(
+        self,
+        nodes: int = 0,
+        relationships: int = 0,
+        read_results: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self.nodes = nodes
         self.relationships = relationships
+        self.read_results = read_results or {}
 
     def session(self) -> _FakeSession:
-        return _FakeSession(self.nodes, self.relationships)
+        return _FakeSession(self.nodes, self.relationships, self.read_results)
 
 
 # ---------------------------------------------------------------------------

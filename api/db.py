@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import certifi
 from dotenv import load_dotenv
@@ -61,3 +62,15 @@ def graph_stats() -> dict[str, int]:
         nodes: int = s.run("MATCH (n) RETURN count(n) AS c").single()["c"]
         rels: int = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
     return {"nodes": nodes, "relationships": rels}
+
+
+def run_read(cypher: str, **params: Any) -> list[dict[str, Any]]:
+    """Execute a read-only Cypher query and return rows as plain dicts.
+
+    This is the single read accessor used by ``api.rag``; tests swap
+    ``_driver`` for a fake whose ``session().run(...)`` yields seeded records,
+    so this function is exercised end-to-end without a live database.
+    """
+    with _get_driver().session() as s:
+        result = s.run(cypher, **params)
+        return [dict(record) for record in result]

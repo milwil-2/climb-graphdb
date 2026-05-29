@@ -113,6 +113,9 @@ it is a deliberate violation, not an accident.)
 - A maintainer's Claude session **reviews each PR** (`/security-review` +
   `/code-review`) and then **completes the merge** via auto-merge — see
   *Merge policy* above. Don't enable auto-merge on a PR you haven't reviewed.
+- **`/ship`** runs the whole land-the-PR flow end-to-end (push → PR →
+  `/security-review` + `/code-review` → label → auto-merge → cleanup). It still
+  obeys the review gate above; it never merges on a blocking finding.
 
 ### MCP servers & plugins (shared vs personal)
 

@@ -21,7 +21,16 @@
       "Bash(gh pr list:*)",
       "Bash(gh issue view:*)",
       "Bash(gh issue list:*)",
-      "Bash(gh run view:*)"
+      "Bash(gh run view:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git merge:*)",
+      "Bash(git worktree:*)",
+      "Bash(git branch -d:*)",
+      "Bash(git branch -D:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh pr merge:*)"
     ],
     "deny": [
       "Read(./.env)",

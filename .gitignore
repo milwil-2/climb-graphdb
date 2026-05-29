@@ -39,8 +39,9 @@ dist/
 .idea/
 .vscode/
 
-# ── Local-only proprietary planning / agent docs (never commit) ───────────────
+# ── Local-only proprietary planning docs (never commit) ───────────────────────
+# NOTE: CLAUDE.md IS committed (lean, rules-only agent guide; auto-loaded by
+# Claude Code). Only the planning/design IP below stays local.
 PRD.md
 PLAN.md
 IMPLEMENTATION_PLAN.md
-CLAUDE.md

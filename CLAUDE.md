@@ -61,7 +61,8 @@ uv run uvicorn api.index:app --reload       # run the API locally
   hook. Personal overrides go in the gitignored `.claude/settings.local.json`.
 - **`.mcp.json`** (committed) — a **read-only** Neo4j MCP server
   (`mcp-neo4j-cypher` via `uvx`, `NEO4J_READ_ONLY=true`); creds resolve from env
-  (`${NEO4J_URI}`/`${NEO4J_USER}`/`${NEO4J_PASSWORD}`) — **not committed**. Enabled
+  (`${NEO4J_URI}`/`${NEO4J_USER}`/`${NEO4J_PASSWORD}`) — **not committed**. The repo
+  ships a `.envrc`; run `direnv allow` once so `.env` reaches this server. Enabled
   plugins: `code-review`, `claude-md-management`.
 
 ## CRITICAL gotchas

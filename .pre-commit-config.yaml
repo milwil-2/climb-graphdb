@@ -31,8 +31,7 @@ repos:
     hooks:
       - id: bandit
         name: bandit
-        # NOTE: add sync once that package is introduced.
-        args: [-r, src, api]
+        args: [-r, src, api, sync]
         pass_filenames: false
 
   # ── Gitleaks: secret / credential detection ───────────────────────────────────

@@ -41,7 +41,7 @@ jobs:
 
       # ── Type checking ──────────────────────────────────────────────────────
       - name: mypy
-        run: uv run mypy src
+        run: uv run mypy src sync api
 
       # ── Security scans ─────────────────────────────────────────────────────
       # B101 (assert_used) is skipped: the asserts in sync/ are intentional
@@ -55,7 +55,7 @@ jobs:
 
       # ── Tests ──────────────────────────────────────────────────────────────
       - name: pytest
-        run: uv run pytest --cov=src --cov-report=term-missing
+        run: uv run pytest --cov=src --cov-report=term-missing --cov-fail-under=85
 
       # ── Isolation guard ────────────────────────────────────────────────────
       # Fails the build if any file under src/, sync/, or api/ tries to import

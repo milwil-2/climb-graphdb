@@ -113,6 +113,9 @@ it is a deliberate violation, not an accident.)
 - A maintainer's Claude session **reviews each PR** (`/security-review` +
   `/code-review`) and then **completes the merge** via auto-merge — see
   *Merge policy* above. Don't enable auto-merge on a PR you haven't reviewed.
+- **`/ship`** runs the whole land-the-PR flow end-to-end (push → PR →
+  `/security-review` + `/code-review` → label → auto-merge → cleanup). It still
+  obeys the review gate above; it never merges on a blocking finding.
 
 ### MCP servers & plugins (shared vs personal)
 
@@ -124,8 +127,12 @@ without overwriting personal setup:
   - `neo4j` — Neo4j's official `mcp-neo4j-cypher` (run via `uvx`), wired
     **read-only** (`NEO4J_READ_ONLY=true`) so a session can query the graph but
     never mutate it. **Secrets are not committed** — it reads `NEO4J_URI`,
-    `NEO4J_USER`, `NEO4J_PASSWORD` from your env/`.env`. With no creds set, the
-    server simply won't connect; nothing else breaks.
+    `NEO4J_USER`, `NEO4J_PASSWORD` from the **environment of the shell that
+    launches `claude`**; `.env` is **not** auto-loaded into MCP servers. This
+    repo commits a `.envrc` so **direnv** exports `.env` for you (run `direnv
+    allow` once). Without direnv, run `set -a; source .env; set +a` before
+    `claude`. With no creds set, the server simply won't connect; nothing else
+    breaks.
   - Add a project-wide server by editing `.mcp.json` (reference secrets as
     `${ENV_VAR}`, never inline them) and open a PR.
 - **Personal/global MCP servers** (e.g. Gmail, Calendar) stay in *your* user

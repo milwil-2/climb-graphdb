@@ -56,7 +56,7 @@ Idempotency
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal, Protocol
 
@@ -90,6 +90,10 @@ class GraphClientLike(Protocol):
         props: dict[str, Any] | None = None,
     ) -> None: ...
 
+    def merge_nodes(self, label: str, rows: list[dict[str, Any]]) -> None: ...
+
+    def merge_rels(self, rel_type: str, rows: list[dict[str, Any]]) -> None: ...
+
     def run_read(self, cypher: str, **params: Any) -> list[dict[str, Any]]: ...
 
 
@@ -104,6 +108,13 @@ class GraphClientLike(Protocol):
 #: ``loc`` is the venue ``location`` point (may be NULL for an unresolved venue);
 #: we read its ``longitude`` / ``latitude`` components directly so the result is
 #: a plain JSON-serialisable dict and tests need no neo4j point type.
+#:
+#: ``athlete_id`` / ``event_id`` are returned as the RAW integer source ids
+#: (``toInteger(split(a.id,':')[1])``), NOT the full node id ("ath:5"). The rest
+#: of this sync rebuilds node ids via ``vocab.ath``/``vocab.evt`` and denormalizes
+#: the raw ids onto RestednessState so ``sync/validate_elo`` (which works in
+#: source-int space) can join on them. Returning the full node id here would both
+#: double-prefix the rebuilt ids (zeroing every edge) and break that join.
 ATHLETE_EVENT_QUERY = """
 MATCH (a:Athlete)-[:COMPETED_IN]->(:Performance)-[:OF_ROUND]->(:Round)
       -[:OF_EVENT]->(e:Event)
@@ -113,8 +124,8 @@ WITH a, e, v, tz,
      CASE WHEN v.location IS NULL THEN NULL ELSE v.location.longitude END AS lon,
      CASE WHEN v.location IS NULL THEN NULL ELSE v.location.latitude END AS lat
 RETURN DISTINCT
-       a.id        AS athlete_id,
-       e.id        AS event_id,
+       toInteger(split(a.id, ':')[1]) AS athlete_id,
+       toInteger(split(e.id, ':')[1]) AS event_id,
        e.start_date AS start_date,
        lon         AS venue_lon,
        lat         AS venue_lat,
@@ -126,7 +137,7 @@ RETURN DISTINCT
 #: emitted by P2). One row per athlete (athletes without BASED_IN are absent).
 ATHLETE_HOME_QUERY = """
 MATCH (a:Athlete)-[:BASED_IN]->(c:Country)
-RETURN a.id AS athlete_id, c.iso3 AS iso3
+RETURN toInteger(split(a.id, ':')[1]) AS athlete_id, c.iso3 AS iso3
 """
 
 #: Representative coordinates + timezone for each country, derived from the
@@ -380,8 +391,77 @@ def _select_origin(
     return "home_base", home, CONFIDENCE_UNRESOLVED
 
 
+# ---------------------------------------------------------------------------
+# In-memory accumulator — collects rows before the batched flush.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TravelAccumulator:
+    """Collects deduped node and edge rows for a single batched flush.
+
+    Nodes are keyed by ``(label, node_id)``; edges by ``(rel_type, src_id, tgt_id)``.
+    Using dicts as the backing store preserves MERGE semantics: the last props
+    written for a given key win, matching what MERGE + SET n += … would do in
+    Neo4j.
+    """
+
+    # label → {node_id: props}
+    nodes: dict[str, dict[str, dict[str, Any]]] = field(
+        default_factory=lambda: {
+            "TravelLeg": {},
+            "RestednessState": {},
+        }
+    )
+    # rel_type → {(src_id, tgt_id): props | None}
+    rels: dict[str, dict[tuple[str, str], dict[str, Any] | None]] = field(
+        default_factory=lambda: {
+            "TRAVELED": {},
+            "TO_EVENT": {},
+            "HAD_STATE": {},
+            "AT_EVENT": {},
+        }
+    )
+
+    def add_node(self, label: str, node_id: str, props: dict[str, Any]) -> None:
+        self.nodes[label][node_id] = props
+
+    def add_rel(
+        self,
+        src_id: str,
+        rel_type: str,
+        tgt_id: str,
+        props: dict[str, Any] | None = None,
+    ) -> None:
+        self.rels[rel_type][(src_id, tgt_id)] = props
+
+    def flush(self, client: GraphClientLike) -> None:
+        """Write all accumulated rows to *client* — nodes first, then edges.
+
+        Nodes must precede edges because ``merge_rels`` MATCHes endpoints via the
+        ``:Entity`` id index; writing in the wrong order would silently skip every
+        edge.
+        """
+        for label in ("TravelLeg", "RestednessState"):
+            node_map = self.nodes[label]
+            if node_map:
+                node_rows: list[dict[str, Any]] = [
+                    {"id": nid, "props": props} for nid, props in node_map.items()
+                ]
+                client.merge_nodes(label, node_rows)
+
+        for rel_type in ("TRAVELED", "TO_EVENT", "HAD_STATE", "AT_EVENT"):
+            rel_map = self.rels[rel_type]
+            if rel_map:
+                rel_rows: list[dict[str, Any]] = [
+                    {"src_id": src, "tgt_id": tgt, "props": props}
+                    for (src, tgt), props in rel_map.items()
+                ]
+                client.merge_rels(rel_type, rel_rows)
+
+
 def _emit_leg_and_state(
-    client: GraphClientLike,
+    acc: _TravelAccumulator,
     report: TravelReport,
     *,
     athlete_id: int | str,
@@ -391,7 +471,7 @@ def _emit_leg_and_state(
     confidence: float,
     params: TravelParams,
 ) -> None:
-    """Compute + MERGE one TravelLeg and one RestednessState (with their 4 edges)."""
+    """Compute TravelLeg + RestednessState props and append them to the accumulator."""
     ath_id = vocab.ath(athlete_id)
     evt_id = vocab.evt(current.event_id)
     leg_id = vocab.leg(ath_id, evt_id)
@@ -428,7 +508,7 @@ def _emit_leg_and_state(
         params=params,
     )
 
-    client.merge_node(
+    acc.add_node(
         "TravelLeg",
         leg_id,
         {
@@ -444,12 +524,12 @@ def _emit_leg_and_state(
         },
     )
     report.legs += 1
-    client.merge_rel(ath_id, "TRAVELED", leg_id)
+    acc.add_rel(ath_id, "TRAVELED", leg_id)
     report.edge_traveled += 1
-    client.merge_rel(leg_id, "TO_EVENT", evt_id)
+    acc.add_rel(leg_id, "TO_EVENT", evt_id)
     report.edge_to_event += 1
 
-    client.merge_node(
+    acc.add_node(
         "RestednessState",
         rest_id,
         {
@@ -469,9 +549,9 @@ def _emit_leg_and_state(
         },
     )
     report.states += 1
-    client.merge_rel(ath_id, "HAD_STATE", rest_id)
+    acc.add_rel(ath_id, "HAD_STATE", rest_id)
     report.edge_had_state += 1
-    client.merge_rel(rest_id, "AT_EVENT", evt_id)
+    acc.add_rel(rest_id, "AT_EVENT", evt_id)
     report.edge_at_event += 1
 
     if origin_kind == "home_base":
@@ -505,6 +585,7 @@ def build_travel(
         A :class:`TravelReport` of origin outcomes and node/edge counts.
     """
     report = TravelReport()
+    acc = _TravelAccumulator()
 
     homes_iso3 = {
         str(row["athlete_id"]): str(row["iso3"]).strip().upper()
@@ -538,7 +619,7 @@ def build_travel(
 
             origin_kind, origin, confidence = _select_origin(current, prev, home, params)
             _emit_leg_and_state(
-                client,
+                acc,
                 report,
                 athlete_id=athlete_id,
                 current=current,
@@ -548,6 +629,10 @@ def build_travel(
                 params=params,
             )
             prev = current
+
+    # Flush all accumulated rows in a single pass — nodes before edges so that
+    # merge_rels can MATCH endpoints via the :Entity id index.
+    acc.flush(client)
 
     return report
 

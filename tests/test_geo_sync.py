@@ -33,13 +33,15 @@ from tests.conftest import FakeGraphClient
 # Fixtures — in-memory GeoNames + canned graph reads.
 # ---------------------------------------------------------------------------
 
+# Country codes here are ISO alpha-2 — the real GeoNames cities1000 form, and
+# the form the resolver constrains by (IOC parens code → alpha-2).
 _GEO_RECORDS: list[dict[str, object]] = [
     {
         "geonameid": 2775220,
         "name": "Innsbruck",
         "lat": 47.26266,
         "lon": 11.39454,
-        "country": "AUT",
+        "country": "AT",
         "timezone": "Europe/Vienna",
     },
     {
@@ -47,26 +49,46 @@ _GEO_RECORDS: list[dict[str, object]] = [
         "name": "Bern",
         "lat": 46.94809,
         "lon": 7.44744,
-        "country": "CHE",
+        "country": "CH",
         "timezone": "Europe/Zurich",
     },
 ]
 
-# Event 1 → Innsbruck (resolvable). Event 2 → Bern (resolvable).
-# Event 3 → "Atlantis" (city not in index) but has a country → centroid fallback.
-# Event 4 → no country and an unrecognisable name → skipped entirely.
+# The upstream events table has NO country (all NULL); the host country is
+# derived from the event name's parenthesised IOC code (or backfilled from a
+# same-named coded event). The ``country`` field below is therefore irrelevant
+# to the build and kept only to mirror the real (NULL) schema.
+#
+# Event 1 → Innsbruck (AUT) → resolvable, country AUT.
+# Event 2 → Bern (SUI) → resolvable, IOC SUI → ISO CHE.
+# Event 3 → "Atlantis" (FRA): city not in index but the parens code gives a
+#           country → country-centroid fallback (ISO FRA).
+# Event 4 → no city and no country code → skipped entirely.
+# NOTE: EVENT_QUERY / ATHLETE_QUERY read the existing L1 nodes, so run_read
+# returns each node's ``id`` property — which is ALREADY the full vocab id
+# ("evt:1", "ath:1"), NOT a raw integer. Fixtures mirror that exactly so the
+# sync's id handling is exercised the way it runs in production (a regression
+# guard against re-wrapping the id and double-prefixing it).
 _EVENT_ROWS: list[dict[str, object]] = [
-    {"id": 1, "name": "IFSC World Cup Innsbruck 2024", "country": "AUT"},
-    {"id": 2, "name": "IFSC Climbing World Championships Bern 2023", "country": "CHE"},
-    {"id": 3, "name": "IFSC World Cup Atlantis 2025", "country": "XXX"},
-    {"id": 4, "name": "IFSC World Cup", "country": None},
+    {
+        "id": vocab.evt(1),
+        "name": "IFSC - Climbing World Cup (B,L) - Innsbruck (AUT) 2024",
+        "country": None,
+    },
+    {
+        "id": vocab.evt(2),
+        "name": "IFSC Climbing World Championships - Bern (SUI) 2023",
+        "country": None,
+    },
+    {"id": vocab.evt(3), "name": "IFSC World Cup (L) - Atlantis (FRA) 2025", "country": None},
+    {"id": vocab.evt(4), "name": "IFSC World Cup", "country": None},
 ]
 
 _ATHLETE_ROWS: list[dict[str, object]] = [
-    {"id": 1, "nationality": "USA"},
-    {"id": 2, "nationality": "AUT"},
-    {"id": 3, "nationality": "AUT"},  # shares nationality with athlete 2.
-    {"id": 4, "nationality": None},  # no nationality → no edges.
+    {"id": vocab.ath(1), "nationality": "USA"},
+    {"id": vocab.ath(2), "nationality": "AUT"},
+    {"id": vocab.ath(3), "nationality": "AUT"},  # shares nationality with athlete 2.
+    {"id": vocab.ath(4), "nationality": None},  # no nationality → no edges.
 ]
 
 
@@ -140,8 +162,9 @@ def test_country_centroid_fallback() -> None:
     client = _client()
     _build(client)
 
-    # Event 3's city ("Atlantis") is not in the index → country-level Venue.
-    ven_id = vocab.ven("country-xxx")
+    # Event 3's city ("Atlantis") is not in the index, but its parens code
+    # (FRA) gives a country → country-level Venue keyed at ISO3 ``fra``.
+    ven_id = vocab.ven("country-fra")
     assert client.node_labels[ven_id] == "Venue"
     venue = client.nodes[ven_id]
     assert venue["geocode_confidence"] == CONFIDENCE_COUNTRY
@@ -149,7 +172,7 @@ def test_country_centroid_fallback() -> None:
     assert "location" not in venue
 
     assert (vocab.evt(3), "HELD_AT", ven_id) in client.rels
-    assert (ven_id, "IN_COUNTRY", vocab.ctry("XXX")) in client.rels
+    assert (ven_id, "IN_COUNTRY", vocab.ctry("FRA")) in client.rels
 
 
 def test_country_centroid_fallback_with_point() -> None:
@@ -157,10 +180,10 @@ def test_country_centroid_fallback_with_point() -> None:
     build_geo(
         client,
         _index(),
-        centroids={"XXX": (12.5, -7.25)},
+        centroids={"FRA": (12.5, -7.25)},
     )
 
-    venue = client.nodes[vocab.ven("country-xxx")]
+    venue = client.nodes[vocab.ven("country-fra")]
     assert venue["location"].longitude == 12.5
     assert venue["location"].latitude == -7.25
 
@@ -202,7 +225,8 @@ def test_country_node_shared_across_sources() -> None:
     # nationality (athletes 2 & 3) but is MERGEd as ONE logical Country node.
     aut_calls = [nid for (label, nid) in client.node_calls if nid == vocab.ctry("AUT")]
     assert len(aut_calls) == 1
-    assert report.node_countries == len({"AUT", "CHE", "XXX", "USA"})
+    # Event countries (AUT, CHE, FRA) + athlete nationality USA.
+    assert report.node_countries == len({"AUT", "CHE", "FRA", "USA"})
 
 
 # ---------------------------------------------------------------------------

@@ -114,6 +114,16 @@ class FakeGraphClient:
         self.rels[(src_id, rel_type, tgt_id)] = dict(props) if props else None
         self.rel_calls.append((src_id, rel_type, tgt_id))
 
+    def merge_nodes(self, label: str, rows: list[dict[str, Any]]) -> None:
+        """Batch variant — records each row exactly as ``merge_node`` would."""
+        for row in rows:
+            self.merge_node(label, row["id"], row["props"])
+
+    def merge_rels(self, rel_type: str, rows: list[dict[str, Any]]) -> None:
+        """Batch variant — records each row exactly as ``merge_rel`` would."""
+        for row in rows:
+            self.merge_rel(row["src_id"], rel_type, row["tgt_id"], row.get("props"))
+
     def run_read(self, cypher: str, **params: Any) -> list[dict[str, Any]]:
         """Return canned rows for *cypher* (empty list if unseeded)."""
         return self._read_results.get(cypher, [])

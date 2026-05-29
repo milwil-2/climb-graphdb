@@ -67,6 +67,8 @@ class GraphClientLike(Protocol):
 
     def merge_node(self, label: str, node_id: str, props: dict[str, Any]) -> None: ...
 
+    def merge_nodes(self, label: str, rows: list[dict[str, Any]]) -> None: ...
+
     def run_read(self, cypher: str, **params: Any) -> list[dict[str, Any]]: ...
 
 
@@ -303,19 +305,21 @@ def _write_performances(
     """MERGE ``expected_rank`` / ``elo_residual`` onto each Performance node.
 
     Idempotent: keyed on the deterministic ``perf:{round_id}:{athlete_id}`` id
-    via ``merge_node`` (props are SET, so existing fields are preserved).
+    via a single batched ``merge_nodes`` call (UNWIND). Props are SET, so
+    existing fields on the node are preserved.
     """
-    for rep in reps:
-        perf_id = vocab.perf(vocab.rnd(rep.round_id), vocab.ath(rep.athlete_id))
-        client.merge_node(
-            "Performance",
-            perf_id,
-            {
+    rows: list[dict[str, Any]] = [
+        {
+            "id": vocab.perf(vocab.rnd(rep.round_id), vocab.ath(rep.athlete_id)),
+            "props": {
                 "expected_rank": rep.expected_rank,
                 "elo_residual": rep.elo_residual,
             },
-        )
-        report.performances_written += 1
+        }
+        for rep in reps
+    ]
+    client.merge_nodes("Performance", rows)
+    report.performances_written = len(rows)
 
 
 # ---------------------------------------------------------------------------

@@ -30,24 +30,6 @@ climbing data. The key trust boundaries are:
 | `pip-audit` | CI | Known CVEs in locked dependencies |
 | `gitleaks` | Pre-commit + CI (separate job) | Secret / token patterns in git history and working tree |
 | GitHub Dependabot | Weekly (automated PRs) | `pip` packages and GitHub Actions versions |
-| Claude AI review | Every PR (automated) | Security-focused code review of the PR diff (see below) |
-
-## Automated review
-
-Every pull request is automatically reviewed by Anthropic's official
-`anthropics/claude-code-action@v1` via the
-[`.github/workflows/claude-review.yml`](.github/workflows/claude-review.yml)
-workflow. The reviewer focuses on secret/credential leakage, Cypher injection
-(labels and relationship types must go through the closed-vocabulary validators),
-the project isolation rule (no imports of `climbing_elo` / `knowledge_graph`),
-unsafe deserialization, SSRF/path traversal in the news and ingest code, and
-dependency risk. It posts findings as a PR review comment and is **non-blocking**
-— it never fails the build or gates a merge.
-
-It requires the `ANTHROPIC_API_KEY` repository secret
-(Settings → Secrets and variables → Actions). Without that secret the job
-no-ops and does not block PRs. Treat its output as advisory; human review still
-applies.
 
 ## Supported Versions
 

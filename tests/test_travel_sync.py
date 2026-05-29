@@ -165,6 +165,23 @@ def test_restedness_props_present_and_clamped() -> None:
     assert 0.0 <= rest1["travel_fatigue"] <= 1.0
 
 
+def test_restedness_carries_validate_elo_join_keys() -> None:
+    """Cross-module contract: RestednessState must carry the scalar props that
+    ``sync.validate_elo``'s correlation query (REST_QUERY) reads — keyed on the
+    RAW climbing-elo ids — or the rested_index↔elo_residual correlation
+    silently degrades to n=0 against a live graph (PRD §9 validation hook)."""
+    client = _client()
+    build_travel(client)
+
+    rest1 = client.nodes[vocab.rest(vocab.ath(1), vocab.evt(1))]
+    for key in ("athlete_id", "event_id", "rested_index", "discipline", "travel_direction"):
+        assert key in rest1, f"RestednessState missing {key!r} (validate_elo join key)"
+    # Join keys are the raw climbing-elo ids, not the namespaced ath:/evt: ids.
+    assert rest1["athlete_id"] == 1
+    assert rest1["event_id"] == 1
+    assert rest1["travel_direction"] in {"E", "W", "none"}
+
+
 # ---------------------------------------------------------------------------
 # Origin selection — swing vs home_base.
 # ---------------------------------------------------------------------------

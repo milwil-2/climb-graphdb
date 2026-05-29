@@ -118,7 +118,8 @@ RETURN DISTINCT
        e.start_date AS start_date,
        lon         AS venue_lon,
        lat         AS venue_lat,
-       tz.iana     AS venue_tz
+       tz.iana     AS venue_tz,
+       e.discipline AS discipline
 """
 
 #: The athlete's home-base country (nationality proxy via the BASED_IN edge
@@ -187,6 +188,7 @@ class AthleteEvent:
     event_id: int | str
     start_date: date | None
     venue: Place
+    discipline: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +336,7 @@ def _group_athlete_events(rows: list[dict[str, Any]]) -> dict[int | str, list[At
                 lat=_to_float(row.get("venue_lat")),
                 tz=str(row["venue_tz"]) if row.get("venue_tz") else None,
             ),
+            discipline=str(row["discipline"]) if row.get("discipline") else None,
         )
         by_athlete.setdefault(athlete_id, {})[event_id] = ae
 
@@ -450,6 +453,13 @@ def _emit_leg_and_state(
         "RestednessState",
         rest_id,
         {
+            # Denormalized join keys + breakdown dims so the ELO-validation
+            # correlation (sync/validate_elo REST_QUERY) reads them directly,
+            # rather than degrading to n=0. See PRD §9 validation hook.
+            "athlete_id": athlete_id,
+            "event_id": current.event_id,
+            "discipline": current.discipline,
+            "travel_direction": rep["direction"],
             "days_since_arrival": rep["days_since_arrival"],
             "recovery_days_needed": rep["recovery_days_needed"],
             "jetlag_residual": rep["jetlag_residual"],

@@ -89,6 +89,21 @@ gh pr merge <n> --auto --squash    # merges automatically when checks pass
 > especially for external/contributor PRs. A human can still approve normally,
 > and admins can `gh pr merge --admin` in a pinch.
 
+**Enforced review gate (every Claude session).** A committed `PreToolUse` hook
+(`.claude/hooks/require-pr-review.sh`, wired in `.claude/settings.json`) **blocks
+`gh pr merge`** until the PR carries the **`claude-reviewed`** label. Add that
+label *only* after `/security-review` + `/code-review` come back with no
+high/critical findings:
+
+```bash
+gh pr edit <n> --add-label claude-reviewed   # only after a clean review
+gh pr merge <n> --auto --squash
+```
+
+A fresh session that tries to merge without reviewing is stopped with
+instructions. (The hook can't audit the *substance* of the review, so skipping
+it is a deliberate violation, not an accident.)
+
 ## Working with Claude Code
 
 - Commit the shared **`.claude/settings.json`** (agreed permissions); keep
@@ -98,6 +113,29 @@ gh pr merge <n> --auto --squash    # merges automatically when checks pass
 - A maintainer's Claude session **reviews each PR** (`/security-review` +
   `/code-review`) and then **completes the merge** via auto-merge — see
   *Merge policy* above. Don't enable auto-merge on a PR you haven't reviewed.
+
+### MCP servers & plugins (shared vs personal)
+
+Claude Code config is split so the whole team gets the same *project* tooling
+without overwriting personal setup:
+
+- **Project MCP servers are committed in `.mcp.json`** — every session in this
+  clone picks them up (you'll get a one-time trust prompt). Currently:
+  - `neo4j` — Neo4j's official `mcp-neo4j-cypher` (run via `uvx`), wired
+    **read-only** (`NEO4J_READ_ONLY=true`) so a session can query the graph but
+    never mutate it. **Secrets are not committed** — it reads `NEO4J_URI`,
+    `NEO4J_USER`, `NEO4J_PASSWORD` from your env/`.env`. With no creds set, the
+    server simply won't connect; nothing else breaks.
+  - Add a project-wide server by editing `.mcp.json` (reference secrets as
+    `${ENV_VAR}`, never inline them) and open a PR.
+- **Personal/global MCP servers** (e.g. Gmail, Calendar) stay in *your* user
+  config — don't add them to `.mcp.json`.
+- **Plugins:** installs are environment/account-specific, so we share the
+  *requirements*, not the install. Recommended for this repo: none required to
+  contribute. If you rely on one (e.g. a Vercel deploy plugin), note it in your
+  PR rather than forcing it on everyone. Shared agreed permissions live in the
+  committed `.claude/settings.json`; keep personal tweaks in the gitignored
+  `.claude/settings.local.json`.
 
 ## Security & isolation
 

@@ -14,11 +14,12 @@ cmd=$(printf '%s' "$input" | python3 -c \
   "import json,sys; print(json.load(sys.stdin).get('tool_input',{}).get('command',''))" \
   2>/dev/null || true)
 
-# Only police merges; let everything else through.
-case "$cmd" in
-  *"gh pr merge"*) ;;
-  *) exit 0 ;;
-esac
+# Only police actual `gh pr merge` invocations — match at a command position
+# (start, or right after a shell separator), NOT the substring inside quoted
+# args like a PR body that happens to contain the text "gh pr merge".
+if ! printf '%s' "$cmd" | grep -qE '(^|[;&|(]|&&|\|\|)[[:space:]]*gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)'; then
+  exit 0
+fi
 
 # Resolve EVERY PR this command targets — handles compound lines like
 # `gh pr merge 5 && gh pr merge 9` (don't let a labeled PR smuggle an

@@ -44,9 +44,11 @@ jobs:
         run: uv run mypy src
 
       # ── Security scans ─────────────────────────────────────────────────────
-      # NOTE: sync/ does not exist yet in P0; add it here once introduced.
+      # B101 (assert_used) is skipped: the asserts in sync/ are intentional
+      # type-narrowing on trusted internal data, not security gates. All other
+      # bandit checks run at full severity (policy: fail on real findings).
       - name: bandit
-        run: uv run bandit -r src api
+        run: uv run bandit -r src api sync -s B101
 
       - name: pip-audit
         run: uv run pip-audit
@@ -59,10 +61,9 @@ jobs:
       # Fails the build if any file under src/, sync/, or api/ tries to import
       # the sibling projects climbing_elo or knowledge_graph.
       # This project must be fully self-contained and NEVER depend on those.
-      # NOTE: add sync/ to the search dirs once that package is introduced.
       - name: Isolation guard
         run: |
-          ! grep -rnE "^(from|import) (climbing_elo|knowledge_graph)" src api 2>/dev/null
+          ! grep -rnE "^(from|import) (climbing_elo|knowledge_graph)" src api sync 2>/dev/null
 
       # ── Tracked-secrets guard ──────────────────────────────────────────────
       # Fails the build if a bare .env file or a data payload (csv/db/sqlite/

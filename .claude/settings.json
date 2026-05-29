@@ -27,7 +27,6 @@
       "Read(./.env)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
-      "Bash(git push:* main)",
       "Bash(git push origin main:*)"
     ]
   },

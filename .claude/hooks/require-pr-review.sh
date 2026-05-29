@@ -20,22 +20,25 @@ case "$cmd" in
   *) exit 0 ;;
 esac
 
-# Resolve the PR number: explicit `gh pr merge <N>`, else the current branch's PR.
-pr=$(printf '%s' "$cmd" | grep -oE "gh pr merge[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || true)
-if [ -z "${pr:-}" ]; then
-  pr=$(gh pr view --json number --jq .number 2>/dev/null || true)
+# Resolve EVERY PR this command targets — handles compound lines like
+# `gh pr merge 5 && gh pr merge 9` (don't let a labeled PR smuggle an
+# unlabeled one through).
+prs=$(printf '%s' "$cmd" | grep -oE "gh pr merge[[:space:]]+[0-9]+" | grep -oE "[0-9]+$" || true)
+if [ -z "${prs:-}" ]; then
+  # No explicit number (e.g. current-branch `gh pr merge --auto`) → resolve via gh.
+  prs=$(gh pr view --json number --jq .number 2>/dev/null || true)
 fi
-if [ -z "${pr:-}" ]; then
+if [ -z "${prs:-}" ]; then
   echo "BLOCKED: cannot determine the PR for this merge. Use 'gh pr merge <N>' after a Claude review." >&2
   exit 2
 fi
 
-# Allow only if the review label is present.
-if gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "claude-reviewed"; then
-  exit 0
-fi
-
-cat >&2 <<EOF
+# Block unless EVERY targeted PR carries the review label.
+for pr in $prs; do
+  if gh pr view "$pr" --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "claude-reviewed"; then
+    continue
+  fi
+  cat >&2 <<EOF
 BLOCKED: PR #$pr is not review-verified, so it cannot be merged.
 
 Run a comprehensive review in this session first:
@@ -47,4 +50,6 @@ Confirm there are NO high/critical findings, then mark it reviewed:
 
 …and re-run the merge. (Enforced by .claude/hooks/require-pr-review.sh — see CONTRIBUTING.md.)
 EOF
-exit 2
+  exit 2
+done
+exit 0

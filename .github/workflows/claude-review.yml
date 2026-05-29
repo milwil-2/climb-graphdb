@@ -1,0 +1,83 @@
+name: Claude Security & Code Review
+
+# Hands-off, auto-running AI reviewer for every PR.
+# Uses Anthropic's official action (anthropics/claude-code-action@v1).
+# Non-blocking: it posts a review comment but never fails the build.
+#
+# REQUIRED SETUP (maintainer, one-time):
+#   Add the `ANTHROPIC_API_KEY` repo secret under
+#   Settings -> Secrets and variables -> Actions.
+#   Without it, this job no-ops/errors but never blocks merges (see continue-on-error).
+#
+# Auth note: the action's current (v1) recommended input is `anthropic_api_key`.
+# If you prefer Claude subscription auth instead of a metered API key, the
+# action also supports `claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`
+# (generated via `claude setup-token`). Use one or the other, not both.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    # Non-blocking: never fail the PR build on review errors / API issues.
+    continue-on-error: true
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude security & code review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Inline prompt -> automation mode (runs immediately, no @claude needed).
+          prompt: |
+            You are performing a SECURITY-FOCUSED code review of this pull request
+            for the `climb-graphdb` project (a read-oriented Neo4j knowledge-graph
+            service for competitive climbing data).
+
+            Review ONLY the changes in this PR's diff. Post your findings as a single
+            PR review comment. Be concise: list concrete issues with file:line, a
+            severity (CRITICAL / HIGH / MEDIUM / LOW / NIT), and a suggested fix.
+            If you find nothing material, say so briefly. Do NOT block or fail the build.
+
+            Prioritize these project-specific risks:
+
+            1. SECRET / CREDENTIAL LEAKAGE — hardcoded keys, tokens, connection
+               strings, Neo4j/Supabase creds, or anything that should live only in
+               the gitignored `.env`. Flag any `.env`-like data committed.
+
+            2. CYPHER INJECTION — labels and relationship types must NEVER be
+               string-interpolated from untrusted input. They must be validated
+               through the closed-vocabulary validators (e.g. `assert_label` /
+               `assert_rel` in the vocab module). Flag any f-string / concatenated
+               Cypher that injects labels, relationship types, or property keys.
+               Values must always be passed as query parameters, never inlined.
+
+            3. PROJECT ISOLATION RULE — this project must NEVER import
+               `climbing_elo` or `knowledge_graph`. Flag any new import, dynamic
+               import, or sys.path manipulation that reaches those packages.
+
+            4. UNSAFE DESERIALIZATION — `pickle`, `yaml.load` (use `safe_load`),
+               `eval`/`exec`, `marshal`, or untrusted `json`->object reflection.
+
+            5. SSRF & PATH TRAVERSAL in the news / ingest code — outbound HTTP to
+               attacker-controllable URLs, unvalidated redirects, requests without
+               timeouts/allowlists, and file paths built from untrusted input
+               (`../`, absolute paths, unsanitized filenames).
+
+            6. DEPENDENCY RISK — newly added or bumped dependencies: typosquats,
+               unpinned/range versions, abandoned packages, or known-vulnerable
+               versions. Note anything warranting a closer look.
+
+            Also call out injection of property keys, missing auth on write/ingest
+            endpoints, and overly broad permissions if present.
+          claude_args: |
+            --max-turns 15

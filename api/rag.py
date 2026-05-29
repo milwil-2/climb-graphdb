@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from climber_network import config
+import climber_network.config as config
 from climber_network.vocab import assert_label, assert_rel
 
 from . import db

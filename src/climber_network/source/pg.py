@@ -141,11 +141,15 @@ def make_engine(url: str | None = None) -> Engine:
     raw_url = url if url is not None else config.DATABASE_URL()
     parsed = make_url(raw_url)
     connect_args: dict[str, object] = {}
-    if parsed.get_backend_name().startswith("postgresql"):
+    if parsed.get_backend_name() in ("postgresql", "postgres"):
+        # Use psycopg v3 (the installed `psycopg[binary]`), NOT SQLAlchemy's
+        # default psycopg2 — which we don't depend on. A bare `postgresql://`
+        # URL would otherwise try to import psycopg2 and fail at connect time.
+        parsed = parsed.set(drivername="postgresql+psycopg")
         # Supabase requires TLS; sslmode is a libpq/psycopg connect-arg.
         if "sslmode" not in parsed.query:
             connect_args["sslmode"] = "require"
-    return create_engine(raw_url, pool_pre_ping=True, connect_args=connect_args)
+    return create_engine(parsed, pool_pre_ping=True, connect_args=connect_args)
 
 
 @contextmanager

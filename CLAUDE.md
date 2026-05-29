@@ -36,7 +36,7 @@ CI enforces this:
 uv sync --all-extras --dev                  # install (toolchain in [dependency-groups] dev)
 uv run pytest                               # tests (network-marked tests deselected by default)
 uv run ruff format . && uv run ruff check . # format + lint
-uv run mypy src                             # type check
+uv run mypy src sync api                    # type check
 uv run bandit -r src api sync -s B101       # security scan (B101 asserts skipped)
 uv run pip-audit                            # dependency CVE audit
 uv run uvicorn api.index:app --reload       # run the API locally

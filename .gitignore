@@ -31,6 +31,9 @@ dist/
 *.egg-info/
 .vercel/
 
+# ── Claude Code: personal overrides (shared settings.json IS committed) ───────
+.claude/settings.local.json
+
 # ── OS / editor ───────────────────────────────────────────────────────────────
 .DS_Store
 .idea/

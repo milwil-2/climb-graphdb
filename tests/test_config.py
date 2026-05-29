@@ -200,3 +200,41 @@ class TestEnvGetters:
             assert CORS_ALLOW_ORIGINS() != "*"
         finally:
             self._restore_env(saved)
+
+
+# ---------------------------------------------------------------------------
+# Network-test creds guard (conftest.has_live_neo4j_creds)
+# ---------------------------------------------------------------------------
+
+
+class TestHasLiveNeo4jCreds:
+    """The guard backing the ``live_neo4j`` skip fixture (see conftest)."""
+
+    _DUMMIES = {
+        "NEO4J_URI": "bolt://localhost:7687",
+        "NEO4J_USER": "test-instance-id",
+        "NEO4J_PASSWORD": "test-password",
+    }
+
+    def test_dummy_defaults_are_not_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.conftest import has_live_neo4j_creds
+
+        for key, val in self._DUMMIES.items():
+            monkeypatch.setenv(key, val)
+        assert has_live_neo4j_creds() is False
+
+    def test_real_uri_is_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.conftest import has_live_neo4j_creds
+
+        for key, val in self._DUMMIES.items():
+            monkeypatch.setenv(key, val)
+        monkeypatch.setenv("NEO4J_URI", "neo4j+s://real.databases.neo4j.io")
+        assert has_live_neo4j_creds() is True
+
+    def test_real_password_is_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.conftest import has_live_neo4j_creds
+
+        for key, val in self._DUMMIES.items():
+            monkeypatch.setenv(key, val)
+        monkeypatch.setenv("NEO4J_PASSWORD", "s3cret-from-aura")
+        assert has_live_neo4j_creds() is True

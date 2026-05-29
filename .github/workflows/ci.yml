@@ -41,7 +41,7 @@ jobs:
 
       # ── Type checking ──────────────────────────────────────────────────────
       - name: mypy
-        run: uv run mypy src
+        run: uv run mypy src sync api
 
       # ── Security scans ─────────────────────────────────────────────────────
       # B101 (assert_used) is skipped: the asserts in sync/ are intentional

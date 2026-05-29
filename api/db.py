@@ -32,12 +32,12 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 # neo4j+s:// connections to Aura verify correctly.
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
-from neo4j import GraphDatabase  # noqa: E402
+from neo4j import Driver, GraphDatabase  # noqa: E402
 
-_driver = None
+_driver: Driver | None = None
 
 
-def _get_driver():  # type: ignore[return]
+def _get_driver() -> Driver:
     """Return the cached Neo4j driver, constructing it on first call."""
     global _driver
     if _driver is None:
@@ -51,16 +51,22 @@ def _get_driver():  # type: ignore[return]
 def health() -> dict[str, object]:
     """Return ``{"status": "ok"}`` plus live node/relationship counts."""
     with _get_driver().session() as s:
-        nodes: int = s.run("MATCH (n) RETURN count(n) AS c").single()["c"]
-        rels: int = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+        node_rec = s.run("MATCH (n) RETURN count(n) AS c").single()
+        rel_rec = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()
+        assert node_rec is not None and rel_rec is not None
+        nodes: int = node_rec["c"]
+        rels: int = rel_rec["c"]
     return {"status": "ok", "nodes": nodes, "relationships": rels}
 
 
 def graph_stats() -> dict[str, int]:
     """Return ``{"nodes": <int>, "relationships": <int>}``."""
     with _get_driver().session() as s:
-        nodes: int = s.run("MATCH (n) RETURN count(n) AS c").single()["c"]
-        rels: int = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+        node_rec = s.run("MATCH (n) RETURN count(n) AS c").single()
+        rel_rec = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()
+        assert node_rec is not None and rel_rec is not None
+        nodes: int = node_rec["c"]
+        rels: int = rel_rec["c"]
     return {"nodes": nodes, "relationships": rels}
 
 

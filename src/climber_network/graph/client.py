@@ -19,6 +19,7 @@ Gotchas
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -41,11 +42,32 @@ from neo4j import (  # noqa: E402  (import after SSL_CERT_FILE env patch)
 #: while still collapsing tens of thousands of writes into a handful of trips.
 _BATCH_SIZE = 5_000
 
+logger = logging.getLogger(__name__)
+
 
 def _chunked(rows: list[dict[str, Any]], size: int = _BATCH_SIZE) -> Iterator[list[dict[str, Any]]]:
     """Yield *rows* in successive chunks of at most *size* items."""
     for start in range(0, len(rows), size):
         yield rows[start : start + size]
+
+
+def _rel_shortfall_warning(rel_type: str, expected: int, written: int) -> str | None:
+    """Return a warning message when fewer rels were written than rows submitted.
+
+    ``merge_rels`` / ``merge_rel`` MATCH both endpoints by ``:Entity`` id before
+    MERGEing. A row whose ``src_id``/``tgt_id`` matches no node yields no
+    relationship and is silently skipped, so ``written < expected`` means edges
+    were dropped — almost always a missing or mis-built (e.g. double-prefixed)
+    node id. Returns ``None`` when every row was written.
+    """
+    dropped = expected - written
+    if dropped <= 0:
+        return None
+    return (
+        f"relationship write [{rel_type}]: {dropped} of {expected} edges dropped "
+        f"({written} endpoint pairs matched) — a src/tgt id matched no :Entity node, "
+        f"so those edges were silently skipped. Check the id builders / merge order."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +130,21 @@ class GraphClient:
         with self._get_driver().session() as session:
             session.execute_write(_work)
 
+    def _run_write_count(self, cypher: str, count_key: str = "written", **params: Any) -> int:
+        """Run a managed write that ``RETURN``s a single int aggregate, and return it.
+
+        *cypher* must ``RETURN <int> AS <count_key>`` (one aggregate row). The
+        relationship writers use this to learn how many edges actually matched
+        and merged, so a shortfall (silently dropped edges) can be surfaced.
+        """
+
+        def _work(tx: ManagedTransaction) -> int:
+            record = tx.run(cypher, **params).single()
+            return int(record[count_key]) if record is not None else 0
+
+        with self._get_driver().session() as session:
+            return session.execute_write(_work)
+
     def merge_node(self, label: str, node_id: str, props: dict[str, Any]) -> None:
         """MERGE a node by *node_id* and SET all *props*.
 
@@ -155,15 +192,20 @@ class GraphClient:
             cypher = (
                 "MATCH (a:Entity {id:$src_id}), (b:Entity {id:$tgt_id}) "
                 f"MERGE (a)-[r:{safe_rel}]->(b) "
-                "SET r += $props"
+                "SET r += $props "
+                "RETURN count(r) AS written"
             )
-            self._run_write(cypher, src_id=src_id, tgt_id=tgt_id, props=props)
+            written = self._run_write_count(cypher, src_id=src_id, tgt_id=tgt_id, props=props)
         else:
             cypher = (
                 "MATCH (a:Entity {id:$src_id}), (b:Entity {id:$tgt_id}) "
-                f"MERGE (a)-[:{safe_rel}]->(b)"
+                f"MERGE (a)-[r:{safe_rel}]->(b) "
+                "RETURN count(r) AS written"
             )
-            self._run_write(cypher, src_id=src_id, tgt_id=tgt_id)
+            written = self._run_write_count(cypher, src_id=src_id, tgt_id=tgt_id)
+        message = _rel_shortfall_warning(rel_type, 1, written)
+        if message is not None:
+            logger.warning(message)
 
     def merge_rels(self, rel_type: str, rows: list[dict[str, Any]]) -> None:
         """Batch-MERGE many relationships of *rel_type* via chunked UNWIND txns.
@@ -179,10 +221,15 @@ class GraphClient:
             "UNWIND $rows AS row "
             "MATCH (a:Entity {id: row.src_id}), (b:Entity {id: row.tgt_id}) "
             f"MERGE (a)-[r:{safe_rel}]->(b) "
-            "SET r += coalesce(row.props, {})"
+            "SET r += coalesce(row.props, {}) "
+            "RETURN count(r) AS written"
         )
+        written = 0
         for chunk in _chunked(rows):
-            self._run_write(cypher, rows=chunk)
+            written += self._run_write_count(cypher, rows=chunk)
+        message = _rel_shortfall_warning(rel_type, len(rows), written)
+        if message is not None:
+            logger.warning(message)
 
     # ------------------------------------------------------------------
     # Read helpers

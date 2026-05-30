@@ -23,6 +23,7 @@ from climber_network.elo import (
     expected,
     montecarlo,
     reps,
+    rested,
     season,
     weightfit,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "expected_rank_for",
     "montecarlo",
     "reps",
+    "rested",
     "season",
     "weightfit",
 ]

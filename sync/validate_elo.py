@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 import typer
 
+import climber_network.elo.rested as rested
 from climber_network import vocab
 from climber_network.elo.expected import DEFAULT_SCALE, expected_finish_ranks
 from climber_network.elo.reps import RepRound
@@ -56,8 +57,21 @@ from climber_network.elo.reps import mu_before_lookup as _mu_before_lookup_impl
 from climber_network.elo.reps import (
     select_representative_rounds as _select_representative_rounds_impl,
 )
+from climber_network.elo.rested import REST_QUERY  # re-exported for callers/tests
 from climber_network.source import pg
 from climber_network.stats import pearson  # re-exported for callers/tests of this module
+
+# ``REST_QUERY`` (the RestednessState read query) and ``pearson`` are re-exported
+# from here so existing callers/tests that import them from this module keep
+# working after the shared correlation join moved to ``climber_network.elo.rested``.
+__all__ = [
+    "REST_QUERY",
+    "RepRound",
+    "ValidateReport",
+    "build_correlation_report",
+    "pearson",
+    "validate_elo",
+]
 
 app = typer.Typer(add_completion=False, help="P3d: expected_rank / elo_residual + correlation.")
 
@@ -83,17 +97,7 @@ class GraphClientLike(Protocol):
 
 # ROUND_DEPTH and RepRound are re-exported from climber_network.elo.reps so
 # that validate_elo callers (and tests) that import them from here continue to
-# work unchanged.
-
-#: Read query for RestednessState nodes already built by the travel sync (P3*).
-#: Keyed ``rest:{ath_id}:{evt_id}``; we read the rested_index plus the
-#: discipline / travel-direction breakdown dimensions for the report.
-REST_QUERY = (
-    "MATCH (r:RestednessState) "
-    "RETURN r.athlete_id AS athlete_id, r.event_id AS event_id, "
-    "r.rested_index AS rested_index, r.discipline AS discipline, "
-    "r.travel_direction AS travel_direction"
-)
+# work unchanged. REST_QUERY is re-exported from climber_network.elo.rested.
 
 
 # ---------------------------------------------------------------------------
@@ -255,25 +259,10 @@ def _write_performances(
 
 
 # ---------------------------------------------------------------------------
-# Correlation report — ``pearson`` lives in ``climber_network.stats`` (shared).
+# Correlation report — delegated to the shared ``climber_network.elo.rested``
+# helper (the join / grouping is identical to the Monte-Carlo report; only the
+# outcome field — ``elo_residual`` here — and the success-signal string differ).
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _Pair:
-    """One joined (rested_index, elo_residual) sample with breakdown keys."""
-
-    rested_index: float
-    elo_residual: float
-    discipline: str | None
-    travel_direction: str | None
-
-
-def _correlation_block(pairs: list[_Pair]) -> dict[str, Any]:
-    """Build a ``{pearson_r, n}`` block from a list of joined pairs."""
-    xs = [p.rested_index for p in pairs]
-    ys = [p.elo_residual for p in pairs]
-    return {"pearson_r": pearson(xs, ys), "n": len(pairs)}
 
 
 def build_correlation_report(
@@ -294,50 +283,15 @@ def build_correlation_report(
     Gracefully reports ``n = 0`` / ``pearson_r = None`` when no RestednessState
     nodes exist (the travel sync has not been run yet).
     """
-    rest_rows = client.run_read(REST_QUERY)
-
-    # Map (athlete_id, event_id) → (rested_index, travel_direction) from the graph.
-    rested: dict[tuple[int, int], tuple[float, str | None]] = {}
-    for row in rest_rows:
-        athlete_id = row.get("athlete_id")
-        event_id = row.get("event_id")
-        rested_index = row.get("rested_index")
-        if athlete_id is None or event_id is None or rested_index is None:
-            continue
-        rested[(int(athlete_id), int(event_id))] = (
-            float(rested_index),
-            row.get("travel_direction"),
-        )
-
-    pairs: list[_Pair] = []
-    for rep in reps:
-        match = rested.get((rep.athlete_id, rep.event_id))
-        if match is None:
-            continue
-        rested_index, travel_direction = match
-        pairs.append(
-            _Pair(
-                rested_index=rested_index,
-                elo_residual=rep.elo_residual,
-                discipline=rep.discipline or None,
-                travel_direction=travel_direction,
-            )
-        )
-
-    by_discipline: dict[str, list[_Pair]] = defaultdict(list)
-    by_direction: dict[str, list[_Pair]] = defaultdict(list)
-    for p in pairs:
-        if p.discipline:
-            by_discipline[p.discipline].append(p)
-        if p.travel_direction:
-            by_direction[p.travel_direction].append(p)
-
-    return {
-        "overall": _correlation_block(pairs),
-        "by_discipline": {k: _correlation_block(v) for k, v in by_discipline.items()},
-        "by_travel_direction": {k: _correlation_block(v) for k, v in by_direction.items()},
-        "success_signal": "negative correlation expected (lower rested → worse-than-expected)",
-    }
+    return rested.correlate_against_rested(
+        client,
+        reps,
+        athlete_id=lambda rep: rep.athlete_id,
+        event_id=lambda rep: rep.event_id,
+        outcome=lambda rep: rep.elo_residual,
+        discipline=lambda rep: rep.discipline,
+        success_signal="negative correlation expected (lower rested → worse-than-expected)",
+    )
 
 
 # ---------------------------------------------------------------------------

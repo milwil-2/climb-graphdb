@@ -43,9 +43,9 @@ from typing import Any, Protocol
 
 import typer
 
+import climber_network.elo.montecarlo as mc
 from climber_network import vocab
 from climber_network.config import MC_PARAMS, MonteCarloParams
-from climber_network.elo import montecarlo as mc
 from climber_network.elo.reps import (
     RepRound,
     mu_before_lookup,
@@ -54,9 +54,10 @@ from climber_network.elo.reps import (
 )
 from climber_network.source import pg
 
-# Reuse the Pearson helper + RestednessState read query from the closed-form
-# sync rather than duplicating them — both outcome reports share the join.
-from sync.validate_elo import REST_QUERY, pearson
+# Shared Pearson helper + the RestednessState read query reused from the
+# closed-form sync — both outcome reports share the same join.
+from climber_network.stats import pearson
+from sync.validate_elo import REST_QUERY
 
 app = typer.Typer(
     add_completion=False, help="L3b: Monte-Carlo placement distribution + correlation."

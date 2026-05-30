@@ -44,6 +44,7 @@ from typing import Any, Protocol
 import typer
 
 import climber_network.elo.montecarlo as mc
+import climber_network.elo.rested as rested
 from climber_network import vocab
 from climber_network.config import MC_PARAMS, MonteCarloParams
 from climber_network.elo.reps import (
@@ -52,12 +53,17 @@ from climber_network.elo.reps import (
     select_representative_rounds,
     sigma_before_lookup,
 )
+
+# The RestednessState read query + the shared correlation join (overall /
+# by_discipline / by_travel_direction Pearson blocks) live in the shared
+# ``elo.rested`` helper — the same join the closed-form report uses. REST_QUERY
+# is re-exported here so existing callers/tests can import it from this module.
+from climber_network.elo.rested import REST_QUERY
 from climber_network.source import pg
 
-# Shared Pearson helper + the RestednessState read query reused from the
-# closed-form sync — both outcome reports share the same join.
-from climber_network.stats import pearson
-from sync.validate_elo import REST_QUERY
+# ``REST_QUERY`` is re-exported from here so existing callers/tests can import it
+# from this module after the shared correlation join moved to ``elo.rested``.
+__all__ = ["REST_QUERY", "McRep", "McReport", "build_correlation_report", "monte_carlo"]
 
 app = typer.Typer(
     add_completion=False, help="L3b: Monte-Carlo placement distribution + correlation."
@@ -267,25 +273,10 @@ def _write_performances(
 
 # ---------------------------------------------------------------------------
 # Correlation — rested_index vs result_percentile (MC counterpart of the
-# elo_residual report; reuses the shared pearson + REST_QUERY).
+# elo_residual report). Delegated to the shared ``climber_network.elo.rested``
+# helper; only the outcome field (``result_percentile``) and the success-signal
+# string differ from the closed-form report.
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _Pair:
-    """One joined (rested_index, result_percentile) sample with breakdown keys."""
-
-    rested_index: float
-    result_percentile: float
-    discipline: str | None
-    travel_direction: str | None
-
-
-def _correlation_block(pairs: list[_Pair]) -> dict[str, Any]:
-    """Build a ``{pearson_r, n}`` block from a list of joined pairs."""
-    xs = [p.rested_index for p in pairs]
-    ys = [p.result_percentile for p in pairs]
-    return {"pearson_r": pearson(xs, ys), "n": len(pairs)}
 
 
 def build_correlation_report(
@@ -299,50 +290,17 @@ def build_correlation_report(
     can be compared directly. Gracefully reports ``n = 0`` when no RestednessState
     nodes exist yet.
     """
-    rest_rows = client.run_read(REST_QUERY)
-    rested: dict[tuple[int, int], tuple[float, str | None]] = {}
-    for row in rest_rows:
-        athlete_id = row.get("athlete_id")
-        event_id = row.get("event_id")
-        rested_index = row.get("rested_index")
-        if athlete_id is None or event_id is None or rested_index is None:
-            continue
-        rested[(int(athlete_id), int(event_id))] = (
-            float(rested_index),
-            row.get("travel_direction"),
-        )
-
-    pairs: list[_Pair] = []
-    for rep in reps:
-        match = rested.get((rep.athlete_id, rep.event_id))
-        if match is None:
-            continue
-        rested_index, travel_direction = match
-        pairs.append(
-            _Pair(
-                rested_index=rested_index,
-                result_percentile=rep.result_percentile,
-                discipline=rep.discipline or None,
-                travel_direction=travel_direction,
-            )
-        )
-
-    by_discipline: dict[str, list[_Pair]] = defaultdict(list)
-    by_direction: dict[str, list[_Pair]] = defaultdict(list)
-    for p in pairs:
-        if p.discipline:
-            by_discipline[p.discipline].append(p)
-        if p.travel_direction:
-            by_direction[p.travel_direction].append(p)
-
-    return {
-        "overall": _correlation_block(pairs),
-        "by_discipline": {k: _correlation_block(v) for k, v in by_discipline.items()},
-        "by_travel_direction": {k: _correlation_block(v) for k, v in by_direction.items()},
-        "success_signal": (
+    return rested.correlate_against_rested(
+        client,
+        reps,
+        athlete_id=lambda rep: rep.athlete_id,
+        event_id=lambda rep: rep.event_id,
+        outcome=lambda rep: rep.result_percentile,
+        discipline=lambda rep: rep.discipline,
+        success_signal=(
             "negative correlation expected (lower rested → higher result_percentile / worse)"
         ),
-    }
+    )
 
 
 # ---------------------------------------------------------------------------

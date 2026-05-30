@@ -61,6 +61,9 @@ CREATE CONSTRAINT document_id IF NOT EXISTS
 CREATE CONSTRAINT extractionrun_id IF NOT EXISTS
   FOR (n:ExtractionRun) REQUIRE n.id IS UNIQUE;
 
+CREATE CONSTRAINT seasonsummary_id IF NOT EXISTS
+  FOR (n:SeasonSummary) REQUIRE n.id IS UNIQUE;
+
 // --- Additional indexes --------------------------------------------------
 
 // Shared :Entity label index — every node also carries the :Entity label

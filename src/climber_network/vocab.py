@@ -35,6 +35,7 @@ VALID_NODE_LABELS: frozenset[str] = frozenset(
         "Source",
         "Document",
         "ExtractionRun",
+        "SeasonSummary",
     }
 )
 
@@ -63,6 +64,7 @@ VALID_REL_TYPES: frozenset[str] = frozenset(
         "EVIDENCED_BY",
         "FROM_SOURCE",
         "EXTRACTED_BY",
+        "HAD_SEASON",
     }
 )
 
@@ -219,3 +221,12 @@ def doc(url: str) -> str:
 def run(ts: str) -> str:
     """ExtractionRun node id: ``run:<ts>``."""
     return f"run:{ts}"
+
+
+def seas(athlete_id: str, season: int | str, disc_code: str) -> str:
+    """SeasonSummary node id: ``seas:<athlete_id>:<season>:<disc_code>``.
+
+    *athlete_id* is the full athlete node id (e.g. ``ath:5``); one summary per
+    (athlete, season, discipline).
+    """
+    return f"seas:{athlete_id}:{season}:{disc_code}"

@@ -54,6 +54,12 @@ uv run uvicorn api.index:app --reload       # run the API locally
   `os.environ` directly. Import the getter functions or `TRAVEL_PARAMS`.
 - **Tests with every change** — reuse `tests/conftest.py` fixtures; the
   `/gen-test` skill scaffolds a test matching repo conventions.
+- **Submodule re-exports** — each `climber_network` subpackage `__init__.py`
+  re-exports its submodules in `__all__` (e.g. `elo`, `source`, `geo`). This
+  keeps `from climber_network.elo import montecarlo` resolving deterministically
+  under mypy (avoids the order-dependent `has no attribute` flake, #52). When you
+  add a submodule, add it to the package `__init__` re-export + `__all__`;
+  `tests/test_elo_package_exports.py` enforces it for `elo`.
 
 ## Shared Claude Code config
 

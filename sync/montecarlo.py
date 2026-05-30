@@ -43,9 +43,9 @@ from typing import Any, Protocol
 
 import typer
 
+import climber_network.elo.montecarlo as mc
 from climber_network import vocab
 from climber_network.config import MC_PARAMS, MonteCarloParams
-from climber_network.elo import montecarlo as mc
 from climber_network.elo.reps import (
     RepRound,
     mu_before_lookup,

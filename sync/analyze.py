@@ -36,7 +36,7 @@ from typing import Any, Protocol
 
 import typer
 
-from climber_network.elo import calibration as cal
+import climber_network.elo.calibration as cal
 from climber_network.elo.weightfit import WeightSample, fit_weights
 
 app = typer.Typer(add_completion=False, help="L3b Phase 2: MC calibration + travel-weight fitting.")

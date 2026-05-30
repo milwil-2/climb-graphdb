@@ -675,3 +675,160 @@ def utc_offset_hours(iana_tz: str, on_date: date) -> float:
     if offset is None:
         return 0.0
     return offset.total_seconds() / 3600.0
+
+
+# ---------------------------------------------------------------------------
+# Country → representative timezone (capital-city fallback)
+# ---------------------------------------------------------------------------
+#
+# A deterministic, offline reference table mapping a 3-letter country code to
+# the IANA timezone of its **capital city**. It is the fallback used when a
+# country's timezone cannot be derived from the venues actually hosted there
+# (sync.travel home-base origins for nations that never host a resolved event;
+# sync.geo country-centroid fallback Venues). Without it, the L3 ``tz_delta_h``
+# term is silently dropped for those legs, collapsing them to ``direction=none``
+# and diluting the jet-lag↔ELO correlation (see issue #42).
+#
+# Keyed by BOTH ISO 3166-1 alpha-3 and the IOC code where they diverge
+# (SUI/CHE, GER/DEU, SLO/SVN, NED/NLD, …): athlete ``nationality`` flows through
+# to ``Country.iso3`` verbatim and may use either form, so we accept either.
+# For the handful of multi-timezone countries the **capital's** zone is chosen
+# (e.g. USA→America/New_York for Washington DC, AUS→Australia/Sydney for
+# Canberra, RUS→Europe/Moscow) — a documented approximation for a home-base
+# proxy, consistent with the nationality-proxy model already used in P2/P3.
+#
+# Every value is asserted to be a valid IANA zone by the test-suite
+# (``zoneinfo.available_timezones()``), so typos cannot slip in.
+COUNTRY_CAPITAL_TZ: dict[str, str] = {
+    # --- Europe (single-timezone unless noted) ---------------------------
+    "AUT": "Europe/Vienna",
+    "FRA": "Europe/Paris",
+    "DEU": "Europe/Berlin",
+    "GER": "Europe/Berlin",  # IOC
+    "ITA": "Europe/Rome",
+    "ESP": "Europe/Madrid",
+    "CHE": "Europe/Zurich",
+    "SUI": "Europe/Zurich",  # IOC
+    "GBR": "Europe/London",
+    "BEL": "Europe/Brussels",
+    "NLD": "Europe/Amsterdam",
+    "NED": "Europe/Amsterdam",  # IOC
+    "SVN": "Europe/Ljubljana",
+    "SLO": "Europe/Ljubljana",  # IOC
+    "CZE": "Europe/Prague",
+    "POL": "Europe/Warsaw",
+    "NOR": "Europe/Oslo",
+    "SWE": "Europe/Stockholm",
+    "FIN": "Europe/Helsinki",
+    "DNK": "Europe/Copenhagen",
+    "DEN": "Europe/Copenhagen",  # IOC
+    "SVK": "Europe/Bratislava",
+    "HUN": "Europe/Budapest",
+    "ROU": "Europe/Bucharest",
+    "BGR": "Europe/Sofia",
+    "BUL": "Europe/Sofia",  # IOC
+    "GRC": "Europe/Athens",
+    "GRE": "Europe/Athens",  # IOC
+    "PRT": "Europe/Lisbon",
+    "POR": "Europe/Lisbon",  # IOC
+    "IRL": "Europe/Dublin",
+    "SRB": "Europe/Belgrade",
+    "HRV": "Europe/Zagreb",
+    "CRO": "Europe/Zagreb",  # IOC
+    "BIH": "Europe/Sarajevo",
+    "MKD": "Europe/Skopje",
+    "MNE": "Europe/Podgorica",
+    "ALB": "Europe/Tirane",
+    "UKR": "Europe/Kyiv",
+    "BLR": "Europe/Minsk",
+    "LTU": "Europe/Vilnius",
+    "LVA": "Europe/Riga",
+    "LAT": "Europe/Riga",  # IOC
+    "EST": "Europe/Tallinn",
+    "ISL": "Atlantic/Reykjavik",
+    "LUX": "Europe/Luxembourg",
+    "TUR": "Europe/Istanbul",
+    "RUS": "Europe/Moscow",  # multi-tz; capital Moscow
+    "XKX": "Europe/Belgrade",  # Kosovo (UN code); tzdata folds into Belgrade
+    "KOS": "Europe/Belgrade",  # IOC
+    "CYP": "Asia/Nicosia",
+    "MLT": "Europe/Malta",
+    "AND": "Europe/Andorra",
+    "MCO": "Europe/Monaco",
+    # --- Asia / Middle East / Pacific ------------------------------------
+    "JPN": "Asia/Tokyo",
+    "KOR": "Asia/Seoul",
+    "CHN": "Asia/Shanghai",  # multi-tz officially unified to Beijing time
+    "TWN": "Asia/Taipei",
+    "TPE": "Asia/Taipei",  # IOC (Chinese Taipei)
+    "HKG": "Asia/Hong_Kong",
+    "MAC": "Asia/Macau",
+    "IND": "Asia/Kolkata",
+    "IDN": "Asia/Jakarta",  # multi-tz; capital Jakarta
+    "INA": "Asia/Jakarta",  # IOC
+    "MYS": "Asia/Kuala_Lumpur",
+    "MAS": "Asia/Kuala_Lumpur",  # IOC
+    "SGP": "Asia/Singapore",
+    "THA": "Asia/Bangkok",
+    "VNM": "Asia/Ho_Chi_Minh",
+    "VIE": "Asia/Ho_Chi_Minh",  # IOC
+    "PHL": "Asia/Manila",
+    "PHI": "Asia/Manila",  # IOC
+    "KAZ": "Asia/Almaty",  # multi-tz; capital Astana → Almaty zone
+    "MNG": "Asia/Ulaanbaatar",
+    "MGL": "Asia/Ulaanbaatar",  # IOC
+    "IRN": "Asia/Tehran",
+    "IRI": "Asia/Tehran",  # IOC
+    "ISR": "Asia/Jerusalem",
+    "KGZ": "Asia/Bishkek",
+    "UZB": "Asia/Tashkent",
+    "SAU": "Asia/Riyadh",
+    "KSA": "Asia/Riyadh",  # IOC
+    "ARE": "Asia/Dubai",
+    "UAE": "Asia/Dubai",  # IOC
+    "QAT": "Asia/Qatar",
+    "KWT": "Asia/Kuwait",
+    "KUW": "Asia/Kuwait",  # IOC
+    "AUS": "Australia/Sydney",  # multi-tz; capital Canberra → Sydney zone
+    "NZL": "Pacific/Auckland",
+    # --- Americas ---------------------------------------------------------
+    "USA": "America/New_York",  # multi-tz; capital Washington DC
+    "CAN": "America/Toronto",  # multi-tz; capital Ottawa → Toronto zone
+    "MEX": "America/Mexico_City",  # multi-tz; capital Mexico City
+    "BRA": "America/Sao_Paulo",  # multi-tz; capital Brasília → São Paulo zone
+    "ARG": "America/Argentina/Buenos_Aires",
+    "CHL": "America/Santiago",
+    "CHI": "America/Santiago",  # IOC (Chile)
+    "COL": "America/Bogota",
+    "PER": "America/Lima",
+    "ECU": "America/Guayaquil",  # mainland; capital Quito shares this zone
+    "VEN": "America/Caracas",
+    "URY": "America/Montevideo",
+    "URU": "America/Montevideo",  # IOC
+    # --- Africa -----------------------------------------------------------
+    "ZAF": "Africa/Johannesburg",  # capital Pretoria shares this zone
+    "RSA": "Africa/Johannesburg",  # IOC
+    "EGY": "Africa/Cairo",
+    "MAR": "Africa/Casablanca",
+    "KEN": "Africa/Nairobi",
+    "NGA": "Africa/Lagos",
+}
+
+
+def country_capital_tz(country_code: str | None) -> str | None:
+    """Representative IANA timezone for a country's capital, or ``None``.
+
+    A deterministic, offline fallback (see :data:`COUNTRY_CAPITAL_TZ`) used when
+    a country's timezone cannot be derived from its hosted venues. Accepts either
+    an ISO 3166-1 alpha-3 or an IOC 3-letter code (case-insensitive).
+
+    >>> country_capital_tz("JPN")
+    'Asia/Tokyo'
+    >>> country_capital_tz("SUI")  # IOC code for Switzerland
+    'Europe/Zurich'
+    >>> country_capital_tz("ZZZ") is None
+    True
+    """
+    if not country_code:
+        return None
+    return COUNTRY_CAPITAL_TZ.get(country_code.strip().upper())

@@ -23,10 +23,15 @@ Resolution
 
 Country-centroid fallback
     Events whose city cannot be resolved fall back to a **country-level** Venue
-    keyed at ``ven:country-{iso3}`` with a low ``geocode_confidence``. No City /
-    TimeZone is attached (we only know the country). When a centroid coordinate
-    is available (via the optional ``--centroids`` map, see below) it is stamped
-    on the fallback Venue's ``location``; otherwise the Venue carries no point.
+    keyed at ``ven:country-{iso3}`` with a low ``geocode_confidence``. No City is
+    attached (we only know the country), but a representative **TimeZone** — the
+    country's capital-city IANA zone, via
+    :func:`~climber_network.geo.geocode.country_capital_tz` — is linked when
+    known, so the L3 travel build can still derive a ``tz_delta_h`` for legs
+    touching this Venue instead of dropping the timezone term (issue #42). When a
+    centroid coordinate is available (via the optional ``--centroids`` map, see
+    below) it is stamped on the fallback Venue's ``location``; otherwise the
+    Venue carries no point.
 
     Centroid source: the optional centroids file is a JSON object mapping
     ISO 3166-1 alpha-3 codes to ``[longitude, latitude]`` pairs (e.g. derived
@@ -68,6 +73,7 @@ from climber_network.geo.geocode import (
     GeoNamesIndex,
     GeoPoint,
     alpha2_to_alpha3,
+    country_capital_tz,
     extract_city,
     norm_city,
     override_alpha2,
@@ -149,6 +155,7 @@ class GeoReport:
 
     resolved_events: int = 0
     fallback_events: int = 0
+    fallback_with_tz: int = 0  # fallback events whose centroid Venue carries a capital tz.
     skipped_events: int = 0  # no country at all → nothing to anchor.
 
     node_venues: int = 0
@@ -170,8 +177,8 @@ class GeoReport:
         console.print("[bold]L2 geography — build report[/bold]")
         console.print(
             f"  events:    src={self.src_events:>6}  resolved={self.resolved_events} "
-            f"fallback={self.fallback_events} skipped={self.skipped_events} "
-            f"(cache_hits={self.cache_hits})"
+            f"fallback={self.fallback_events} (fallback_with_tz={self.fallback_with_tz}) "
+            f"skipped={self.skipped_events} (cache_hits={self.cache_hits})"
         )
         console.print(f"  athletes:  src={self.src_athletes:>6}")
         console.print(
@@ -433,7 +440,9 @@ def build_geo(
             _emit_resolved(acc, ev, point, iso3, _ensure_country, _ensure_timezone)
             report.resolved_events += 1
         elif iso3:
-            _emit_country_fallback(acc, ev, iso3, centroids, _ensure_country)
+            _emit_country_fallback(
+                acc, ev, iso3, centroids, _ensure_country, _ensure_timezone, report
+            )
             report.fallback_events += 1
         else:
             # No city and no country → nothing to anchor the event to.
@@ -562,11 +571,19 @@ def _emit_country_fallback(
     iso3: str,
     centroids: dict[str, tuple[float, float]],
     ensure_country: Any,
+    ensure_timezone: Any,
+    report: GeoReport,
 ) -> None:
     """Accumulate a low-confidence country-centroid Venue + HELD_AT / IN_COUNTRY.
 
     The fallback Venue is keyed at the country level (``ven:country-{iso3}``) so
     every unresolved event in the same country shares one placeholder Venue.
+
+    A representative IANA timezone (the country's capital, via
+    :func:`~climber_network.geo.geocode.country_capital_tz`) is attached when
+    known, so the L3 travel build can still compute a ``tz_delta_h`` for legs
+    that originate from or arrive at this centroid Venue instead of dropping the
+    timezone term entirely (issue #42).
     """
     # ev["id"] is already the full node id (see _emit_resolved) — do not re-wrap.
     evt_id = ev["id"]
@@ -587,6 +604,13 @@ def _emit_country_fallback(
     ctry_id = ensure_country(iso3)
     # The centroid Venue sits in the country directly (no City to bridge).
     acc.add_rel(ven_id, "IN_COUNTRY", ctry_id)
+
+    # Capital-city timezone so the centroid still carries a tz (issue #42).
+    iana = country_capital_tz(iso3)
+    if iana:
+        tz_id = ensure_timezone(iana)
+        acc.add_rel(ven_id, "IN_TIMEZONE", tz_id)
+        report.fallback_with_tz += 1
 
 
 def _emit_athletes_from_rows(

@@ -28,6 +28,7 @@ from climber_network.vocab import (
     rest,
     rnd,
     run,
+    seas,
     sig,
     slug,
     source_id,
@@ -41,13 +42,20 @@ from climber_network.vocab import (
 
 
 def test_node_labels_count() -> None:
-    """VALID_NODE_LABELS must contain exactly 18 labels."""
-    assert len(VALID_NODE_LABELS) == 18
+    """VALID_NODE_LABELS must contain exactly 19 labels."""
+    assert len(VALID_NODE_LABELS) == 19
 
 
 def test_rel_types_count() -> None:
-    """VALID_REL_TYPES must contain exactly 23 relationship types."""
-    assert len(VALID_REL_TYPES) == 23
+    """VALID_REL_TYPES must contain exactly 24 relationship types."""
+    assert len(VALID_REL_TYPES) == 24
+
+
+def test_season_summary_vocab() -> None:
+    """SeasonSummary label, HAD_SEASON rel, and the seas() id builder (#48 Phase 4)."""
+    assert "SeasonSummary" in VALID_NODE_LABELS
+    assert "HAD_SEASON" in VALID_REL_TYPES
+    assert seas("ath:5", 2024, "L") == "seas:ath:5:2024:L"
 
 
 def test_expected_node_labels_present() -> None:
@@ -70,6 +78,7 @@ def test_expected_node_labels_present() -> None:
         "Source",
         "Document",
         "ExtractionRun",
+        "SeasonSummary",
     }
     assert expected == VALID_NODE_LABELS
 
@@ -99,6 +108,7 @@ def test_expected_rel_types_present() -> None:
         "EVIDENCED_BY",
         "FROM_SOURCE",
         "EXTRACTED_BY",
+        "HAD_SEASON",
     }
     assert expected == VALID_REL_TYPES
 

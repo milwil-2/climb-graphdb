@@ -134,12 +134,28 @@ _TIMELINE_EVENT_ROWS = [
 
 _EXISTS_ROWS = [{"id": _ATHLETE_ID}]
 
+_SEASON_DRIVERS_ROWS = [
+    {
+        "athlete_id": _ATHLETE_ID,
+        "athlete_name": _ATHLETE_NAME,
+        "season": 2024,
+        "discipline": "L",
+        "over_under": 4.0,
+        "mean_rested_index": 0.55,
+        "season_skill": 0.3,
+        "season_consistency": 1.2,
+        "n_events": 5,
+        "n_upsets": 1,
+    }
+]
+
 _READ_RESULTS: dict[str, list[dict[str, Any]]] = {
     queries.PROFILE_CYPHER: _PROFILE_ROWS,
     queries.NEIGHBORHOOD_CYPHER: _NEIGHBORHOOD_ROWS,
     queries.HEAD_TO_HEAD_CYPHER: _HEAD_TO_HEAD_ROWS,
     queries.VENUE_CLUSTERS_CYPHER: _VENUE_CLUSTER_ROWS,
     queries.JETLAGGED_CYPHER: _JETLAGGED_ROWS,
+    queries.SEASON_DRIVERS_CYPHER: _SEASON_DRIVERS_ROWS,
     queries.TIMELINE_EVENTS_CYPHER: _TIMELINE_EVENT_ROWS,
     queries.ATHLETE_EXISTS_CYPHER: _EXISTS_ROWS,
     # TrainingSignal / InjuryEvent: seeded empty ⇒ the L4/P5-era nodes don't
@@ -170,6 +186,7 @@ _ALL_QUERY_CYPHERS = (
     queries.HEAD_TO_HEAD_CYPHER,
     queries.VENUE_CLUSTERS_CYPHER,
     queries.JETLAGGED_CYPHER,
+    queries.SEASON_DRIVERS_CYPHER,
     queries.TIMELINE_EVENTS_CYPHER,
     queries.TIMELINE_SIGNALS_CYPHER,
     queries.TIMELINE_INJURIES_CYPHER,
@@ -346,6 +363,31 @@ def test_jetlagged_no_data_returns_empty(client: TestClient) -> None:
     db._driver = _empty_driver()
     try:
         resp = client.get("/insights/jetlagged-underperformers")
+        assert resp.status_code == 200
+        assert resp.json() == {"rows": []}
+    finally:
+        db._driver = original
+
+
+def test_season_drivers_happy_path(client: TestClient) -> None:
+    resp = client.get("/insights/season-drivers")
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["athlete_id"] == _ATHLETE_ID
+    assert row["season"] == 2024
+    assert row["discipline"] == "L"
+    assert row["over_under"] == pytest.approx(4.0)
+    assert row["mean_rested_index"] == pytest.approx(0.55)
+
+
+def test_season_drivers_no_data_returns_empty(client: TestClient) -> None:
+    """U6b with no SeasonSummary nodes ⇒ empty list, never an error."""
+    original = db._driver
+    db._driver = _empty_driver()
+    try:
+        resp = client.get("/insights/season-drivers")
         assert resp.status_code == 200
         assert resp.json() == {"rows": []}
     finally:

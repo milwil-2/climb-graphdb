@@ -135,6 +135,15 @@ def jetlagged_underperformers() -> dict[str, Any]:
     return {"rows": queries.jetlagged_underperformers()}
 
 
+@app.get("/insights/season-drivers")
+def season_drivers() -> dict[str, Any]:
+    """U6b — athlete-seasons ranked by under-performance, with season restedness.
+
+    Empty until the season aggregation sync (sync.season) has run.
+    """
+    return {"rows": queries.season_drivers()}
+
+
 # ---------------------------------------------------------------------------
 # Static neighborhood viz
 # ---------------------------------------------------------------------------

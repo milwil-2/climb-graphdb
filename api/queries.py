@@ -65,6 +65,7 @@ _VENUE = assert_label("Venue")
 _REST = assert_label("RestednessState")
 _SIGNAL = assert_label("TrainingSignal")
 _INJURY = assert_label("InjuryEvent")
+_SEASON = assert_label("SeasonSummary")
 
 _COMPETED_IN = assert_rel("COMPETED_IN")
 _OF_ROUND = assert_rel("OF_ROUND")
@@ -76,6 +77,7 @@ _HAD_STATE = assert_rel("HAD_STATE")
 _AT_EVENT = assert_rel("AT_EVENT")
 _HAS_SIGNAL = assert_rel("HAS_SIGNAL")
 _HAD_INJURY = assert_rel("HAD_INJURY")
+_HAD_SEASON = assert_rel("HAD_SEASON")
 
 # ---------------------------------------------------------------------------
 # U4 — athlete profile
@@ -339,6 +341,51 @@ def jetlagged_underperformers() -> list[dict[str, Any]]:
             "rested_index": r.get("rested_index"),
             "travel_direction": r.get("travel_direction"),
             "elo_residual": r.get("elo_residual"),
+        }
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# U6b — season drivers (which athlete-seasons under-performed, and were they
+# less rested that season?). Reads the SeasonSummary nodes built by sync.season.
+# ---------------------------------------------------------------------------
+
+#: Athlete-season summaries ranked by most under-performing first (over_under > 0
+#: ⇒ finished worse than expected across the season), with the season's mean
+#: rested_index alongside so the jet-lag link is visible at season granularity.
+SEASON_DRIVERS_CYPHER = (
+    f"MATCH (a:{_ATHLETE})-[:{_HAD_SEASON}]->(s:{_SEASON}) "
+    "WHERE s.over_under IS NOT NULL "
+    "RETURN a.id AS athlete_id, a.name AS athlete_name, "
+    "s.season AS season, s.discipline AS discipline, "
+    "s.over_under AS over_under, s.mean_rested_index AS mean_rested_index, "
+    "s.season_skill AS season_skill, s.season_consistency AS season_consistency, "
+    "s.n_events AS n_events, s.n_upsets AS n_upsets "
+    "ORDER BY s.over_under DESC "
+    "LIMIT $limit"
+)
+
+
+def season_drivers() -> list[dict[str, Any]]:
+    """Return athlete-seasons ranked by most under-performing, with season restedness.
+
+    Gracefully returns ``[]`` when no ``SeasonSummary`` nodes exist yet
+    (the season aggregation sync has not run).
+    """
+    rows = db.run_read(SEASON_DRIVERS_CYPHER, limit=_MAX_UNDERPERFORMERS)
+    return [
+        {
+            "athlete_id": str(r["athlete_id"]),
+            "athlete_name": r.get("athlete_name"),
+            "season": r.get("season"),
+            "discipline": r.get("discipline"),
+            "over_under": r.get("over_under"),
+            "mean_rested_index": r.get("mean_rested_index"),
+            "season_skill": r.get("season_skill"),
+            "season_consistency": r.get("season_consistency"),
+            "n_events": r.get("n_events"),
+            "n_upsets": r.get("n_upsets"),
         }
         for r in rows
     ]

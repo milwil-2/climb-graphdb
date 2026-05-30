@@ -47,3 +47,10 @@ dist/
 PRD.md
 PLAN.md
 IMPLEMENTATION_PLAN.md
+# Planning, design/spec, and research docs are local-only too — including specs
+# auto-saved by the superpowers skills and any agent run plans / drafts.
+/docs/superpowers/
+/docs/agent-plans/
+/docs/research/
+# Autonomous-runner experiment (orchestrator/launcher/templates) — local-only.
+/.claude/overnight/

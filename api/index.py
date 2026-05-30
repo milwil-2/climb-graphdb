@@ -139,7 +139,9 @@ def jetlagged_underperformers() -> dict[str, Any]:
 def season_drivers() -> dict[str, Any]:
     """U6b — athlete-seasons ranked by under-performance, with season restedness.
 
-    Empty until the season aggregation sync (sync.season) has run.
+    Ranked by the per-event-normalized ``mean_over_under`` (not the volume-biased
+    cumulative ``over_under`` sum). Empty until the season aggregation sync
+    (sync.season) has run.
     """
     return {"rows": queries.season_drivers()}
 

@@ -117,7 +117,9 @@ def advancement(
     2. Build the starting field from non-DNS athletes in the entry round who have
        a ``mu_before`` in the rating history.
     3. Derive :class:`~climber_network.elo.advancement.RoundSpec` objects with
-       ``advance_count`` = next round's ``athlete_count`` (last round gets 0).
+       ``advance_count`` = the count of distinct non-DNS athletes actually
+       present in the next round's roster (falling back to that round's recorded
+       ``athlete_count`` when the roster count is 0; last round gets 0).
     4. Call :func:`~climber_network.elo.advancement.simulate_event_progression`
        with a deterministic per-event seed.
     5. Match results to representative rounds and stamp the five additive props.
@@ -210,11 +212,17 @@ def advancement(
             report.skipped["event_empty_field"] += 1
             continue
 
-        # Build RoundSpecs: advance_count = next round's athlete_count (last → 0).
+        # Build RoundSpecs. advance_count = the actual number of distinct non-DNS
+        # athletes who appear in the NEXT round's roster (the true advancers), so
+        # a stale/zero upstream ``athlete_count`` can't collapse the field to 0.
+        # Fall back to the next round's recorded ``athlete_count`` only when that
+        # roster count is 0/unavailable. The last round's advance_count is ignored.
         round_specs: list[adv.RoundSpec] = []
         for i, rnd in enumerate(ordered):
             if i + 1 < len(ordered):
-                advance_count = ordered[i + 1].athlete_count
+                next_round = ordered[i + 1]
+                roster_count = len({res.athlete_id for res in results_by_round[next_round.id]})
+                advance_count = roster_count if roster_count > 0 else next_round.athlete_count
             else:
                 advance_count = 0  # last round — ignored by simulator
             round_specs.append(

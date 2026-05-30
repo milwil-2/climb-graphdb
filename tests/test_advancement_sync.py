@@ -17,6 +17,7 @@ Assertions cover:
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 from climber_network import vocab
@@ -238,6 +239,122 @@ def test_idempotent_rerun(source_session: pg.Session) -> None:
 # ---------------------------------------------------------------------------
 # Test: athletes without mu_before in the entry round are skipped and counted.
 # ---------------------------------------------------------------------------
+
+
+def _seed_zero_athlete_count(session: pg.Session) -> None:
+    """Same layout as :func:`_seed` but the semi round's ``athlete_count`` is 0.
+
+    The semi (round_id=2) carries a stale/zero ``athlete_count``, yet its roster
+    holds 2 distinct non-DNS Results (athletes 1 & 2). The fix must derive the
+    qual→semi ``advance_count`` from that roster (=2), not from the recorded 0,
+    so the field is NOT collapsed to everyone-eliminated.
+    """
+    session.add_all(
+        [
+            pg.Athlete(id=1, name="Ada", gender="F", nationality="USA"),
+            pg.Athlete(id=2, name="Bea", gender="F", nationality="GBR"),
+            pg.Athlete(id=3, name="Cleo", gender="F", nationality="JPN"),
+            pg.Athlete(id=4, name="Dot", gender="F", nationality="AUT"),
+        ]
+    )
+    session.add(
+        pg.Event(
+            id=1,
+            name="World Cup Innsbruck",
+            tier="world_cup",
+            country="AUT",
+            season=2024,
+            start_date=date(2024, 6, 1),
+            discipline="L",
+        )
+    )
+    session.add_all(
+        [
+            pg.Round(id=1, event_id=1, round_type="qualification", gender="F", athlete_count=4),
+            # Stale/zero athlete_count — the simulator must fall back to the roster.
+            pg.Round(id=2, event_id=1, round_type="semi", gender="F", athlete_count=0),
+            pg.Round(id=3, event_id=1, round_type="final", gender="F", athlete_count=2),
+        ]
+    )
+    session.add_all(
+        [
+            pg.Result(id=1, round_id=1, athlete_id=1, rank=1),
+            pg.Result(id=2, round_id=1, athlete_id=2, rank=2),
+            pg.Result(id=3, round_id=1, athlete_id=3, rank=3),
+            pg.Result(id=4, round_id=1, athlete_id=4, rank=4),
+            # Semi roster: 2 distinct non-DNS athletes despite athlete_count=0.
+            pg.Result(id=5, round_id=2, athlete_id=1, rank=1),
+            pg.Result(id=6, round_id=2, athlete_id=2, rank=2),
+            pg.Result(id=7, round_id=3, athlete_id=2, rank=1),
+            pg.Result(id=8, round_id=3, athlete_id=1, rank=2),
+        ]
+    )
+    mus = {1: 1700.0, 2: 1500.0, 3: 1400.0, 4: 1350.0}
+    rid = 0
+    rows: list[pg.RatingHistory] = []
+    for round_id, athletes in {1: (1, 2, 3, 4), 2: (1, 2), 3: (1, 2)}.items():
+        for aid in athletes:
+            rid += 1
+            rows.append(
+                pg.RatingHistory(
+                    id=rid,
+                    athlete_id=aid,
+                    event_id=1,
+                    round_id=round_id,
+                    mu_before=mus[aid],
+                    mu_after=mus[aid],
+                    sigma_before=100.0,
+                    sigma_after=98.0,
+                )
+            )
+    session.add_all(rows)
+    session.commit()
+
+
+def test_advance_count_derived_from_roster_when_athlete_count_zero(
+    source_session: pg.Session,
+) -> None:
+    """A zero next-round ``athlete_count`` must not collapse the field to 0 advancers.
+
+    With the semi round's recorded ``athlete_count`` set to 0 but 2 distinct
+    non-DNS Results in its roster, the qual→semi cut advances 2 athletes. The
+    favourite therefore has a strictly positive p_make_final and a finite
+    advancement_surprise — the bug symptom (everyone eliminated → all zeros and
+    inflated surprise) does not occur.
+    """
+    _seed_zero_athlete_count(source_session)
+    client = FakeGraphClient()
+    advancement(client, source_session, params=_PARAMS)
+
+    fav_props = client.nodes[_perf_id(3, 1)]
+    assert fav_props["p_make_final"] > 0.0
+    assert fav_props["p_podium_event"] > 0.0
+    assert fav_props["p_win_event"] > 0.0
+    assert math.isfinite(fav_props["advancement_surprise"])
+
+
+def test_zero_athlete_count_matches_populated_roster_count(source_session: pg.Session) -> None:
+    """Deriving advance_count from the roster reproduces the populated-count result.
+
+    The semi roster has exactly 2 distinct non-DNS athletes, so setting
+    ``athlete_count`` to either 2 (populated) or 0 (stale, fall back to roster)
+    must yield identical stamped props — confirming the populated-path behavior
+    is unchanged and the fallback is equivalent.
+    """
+    a = FakeGraphClient()
+    _seed(source_session)
+    advancement(a, source_session, params=_PARAMS)
+
+    b = FakeGraphClient()
+    # Fresh session via a second fixture-style build is awkward; instead mutate
+    # the existing rows to athlete_count=0 and re-run — the roster is unchanged.
+    semi = source_session.get(pg.Round, 2)
+    assert semi is not None
+    semi.athlete_count = 0
+    source_session.commit()
+    advancement(b, source_session, params=_PARAMS)
+
+    assert a.nodes == b.nodes
 
 
 def test_athletes_missing_mu_are_skipped(source_session: pg.Session) -> None:

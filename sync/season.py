@@ -5,7 +5,7 @@ Reads the representative-per-(athlete, event) outcome props already stamped on
 one ``SeasonAggregate`` per (athlete, season, discipline) via
 :mod:`climber_network.elo.season`, and MERGEs a ``SeasonSummary`` node (plus a
 ``HAD_SEASON`` edge from the athlete) for each. It also emits the season-driver
-correlation (``over_under`` vs ``mean_rested_index``).
+correlation (``mean_over_under`` vs ``mean_rested_index``).
 
 Read query
     One row per representative (athlete, event) — the representative being the
@@ -106,7 +106,8 @@ class SeasonReport:
             r = overall.get("pearson_r")
             shown = "n/a" if r is None else f"{r:+.4f}"
             console.print(
-                f"  drivers (over_under vs mean_rested_index): r={shown} n={overall.get('n', 0)}"
+                f"  drivers (mean_over_under vs mean_rested_index): r={shown} "
+                f"n={overall.get('n', 0)}"
             )
             by_discipline = drivers.get("by_discipline", {})
             if by_discipline:
@@ -185,6 +186,7 @@ def _write_season_summaries(
             "n_events": agg.n_events,
             "n_upsets": agg.n_upsets,
             "over_under": agg.over_under,
+            "mean_over_under": agg.mean_over_under,
         }
         for name in _ROLLUP_PROPS:
             val = getattr(agg, name)
@@ -213,7 +215,7 @@ def season(
     1. Read one row per representative (athlete, event) via :data:`SEASON_QUERY`.
     2. Aggregate into one :class:`SeasonAggregate` per (athlete, season, discipline).
     3. MERGE a ``SeasonSummary`` node + ``HAD_SEASON`` edge for each (idempotent).
-    4. Compute the season-driver correlation (over_under vs mean_rested_index).
+    4. Compute the season-driver correlation (mean_over_under vs mean_rested_index).
     """
     report = SeasonReport()
 

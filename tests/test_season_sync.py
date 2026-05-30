@@ -111,6 +111,7 @@ def test_season_summaries_merged_with_ids_and_props() -> None:
     assert props["discipline"] == "L"
     assert props["n_events"] == 2
     assert props["over_under"] == 4.0
+    assert props["mean_over_under"] == 2.0  # 4.0 / 2 events
     assert props["mean_elo_residual"] == 2.0
     assert props["season_skill"] == 0.5  # mean p_win [0.6,0.4]
     assert props["season_consistency"] == 3.0  # mean rank_std [2,4]

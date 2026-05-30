@@ -37,21 +37,26 @@ Properties
 
 Scale
 -----
-``scale`` is the logistic temperature. The default of ``173.7`` matches the
-Glicko convention ``400 / ln(10)``, under which a 400-point rating advantage
-corresponds to a 10:1 (~0.909) head-to-head win probability — the classic Elo
-calibration. Callers may pass any positive ``scale`` to widen or sharpen the
-spread of probabilities.
+``scale`` is the logistic temperature. The default ``173.7178`` is copied
+verbatim from climbing-elo's ``GLICKO2_SCALE`` (the Glicko-2 display ↔ internal
+conversion, ``= 400 / ln(10)``), under which a 400-point rating advantage
+corresponds to a 10:1 (~0.909) head-to-head win probability — so our link
+matches the scale on which the upstream ``mu`` ratings are expressed. Callers
+may pass any positive ``scale`` to widen or sharpen the spread of probabilities.
 """
 
 from __future__ import annotations
 
 import math
 
+from climber_network.config import GLICKO2_SCALE
+
 __all__ = ["expected_finish_ranks", "expected_rank_for"]
 
-# 400 / ln(10): an Elo gap of 400 points -> ~0.909 win probability.
-DEFAULT_SCALE: float = 173.7
+#: Default logistic scale — the single source of truth lives in
+#: :data:`climber_network.config.GLICKO2_SCALE` (copied verbatim from
+#: climbing-elo). Re-exposed here as ``DEFAULT_SCALE`` for callers that import it.
+DEFAULT_SCALE: float = GLICKO2_SCALE
 
 
 def _p_ahead(mu_other: float, mu_self: float, scale: float) -> float:

@@ -52,6 +52,11 @@ import typer
 
 from climber_network import vocab
 from climber_network.elo.expected import DEFAULT_SCALE, expected_finish_ranks
+from climber_network.elo.reps import RepRound
+from climber_network.elo.reps import mu_before_lookup as _mu_before_lookup_impl
+from climber_network.elo.reps import (
+    select_representative_rounds as _select_representative_rounds_impl,
+)
 from climber_network.source import pg
 
 app = typer.Typer(add_completion=False, help="P3d: expected_rank / elo_residual + correlation.")
@@ -76,15 +81,9 @@ class GraphClientLike(Protocol):
 # Representative-round selection — deeper rounds preferred.
 # ---------------------------------------------------------------------------
 
-#: Round-type depth ordering. A larger number is a deeper (more selective) round,
-#: so the representative round per (athlete, event) is the one with the max depth.
-ROUND_DEPTH: dict[str, int] = {
-    "qualification": 0,
-    "qual": 0,
-    "semi": 1,
-    "semifinal": 1,
-    "final": 2,
-}
+# ROUND_DEPTH and RepRound are re-exported from climber_network.elo.reps so
+# that validate_elo callers (and tests) that import them from here continue to
+# work unchanged.
 
 #: Read query for RestednessState nodes already built by the travel sync (P3*).
 #: Keyed ``rest:{ath_id}:{evt_id}``; we read the rested_index plus the
@@ -97,28 +96,9 @@ REST_QUERY = (
 )
 
 
-def _round_depth(round_type: str) -> int:
-    """Return the selection depth of *round_type* (unknown types sort lowest)."""
-    return ROUND_DEPTH.get(round_type.lower(), -1)
-
-
 # ---------------------------------------------------------------------------
 # Representative round + roster assembly (read-only from the source session).
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class RepRound:
-    """A chosen representative round for one (athlete, event)."""
-
-    athlete_id: int
-    event_id: int
-    round_id: int
-    round_type: str
-    discipline: str
-    actual_rank: int
-    expected_rank: float
-    elo_residual: float
 
 
 @dataclass
@@ -175,76 +155,28 @@ def _select_representative_rounds(
 ) -> list[RepRound]:
     """Pick the representative round per (athlete, event) from the source data.
 
-    The deepest round each athlete reached (final > semi > qualification); ties
-    on depth are broken by the larger ``round_id`` (deterministic). Rounds the
-    athlete did not start / has no usable rank for are not eligible.
+    Thin wrapper around :func:`climber_network.elo.reps.select_representative_rounds`
+    that propagates counts into the :class:`ValidateReport`.
     """
-    rounds = list(pg.iter_rows(session, pg.Round))
-    results = list(pg.iter_rows(session, pg.Result))
-    events = list(pg.iter_rows(session, pg.Event))
-    report.src_rounds = len(rounds)
-    report.src_results = len(results)
-
-    rounds_by_id: dict[int, pg.Round] = {}
-    for r in rounds:
-        assert isinstance(r, pg.Round)
-        rounds_by_id[r.id] = r
-    event_discipline: dict[int, str] = {}
-    for e in events:
-        assert isinstance(e, pg.Event)
-        event_discipline[e.id] = e.discipline
-
-    # Best (deepest) eligible round per (athlete, event).
-    best: dict[tuple[int, int], tuple[int, int, int, int]] = {}
-    # value tuple: (depth, round_id, actual_rank, round_id_for_tiebreak) — we keep
-    # actual_rank alongside so we don't re-scan results later.
-    for res in results:
-        assert isinstance(res, pg.Result)
-        rnd_row = rounds_by_id.get(res.round_id)
-        if rnd_row is None:
-            report.skipped["result_round_missing"] += 1
-            continue
-        if res.dns or res.rank is None:
-            # Did not start, or no placement → not an eligible finish.
-            report.skipped["result_no_rank_or_dns"] += 1
-            continue
-        event_id = rnd_row.event_id
-        depth = _round_depth(rnd_row.round_type)
-        key = (res.athlete_id, event_id)
-        candidate = (depth, res.round_id, res.rank, res.round_id)
-        current = best.get(key)
-        if current is None or (depth, res.round_id) > (current[0], current[3]):
-            best[key] = candidate
-
-    reps: list[RepRound] = []
-    for (athlete_id, event_id), (_depth, round_id, actual_rank, _tb) in best.items():
-        rnd_row = rounds_by_id[round_id]
-        reps.append(
-            RepRound(
-                athlete_id=athlete_id,
-                event_id=event_id,
-                round_id=round_id,
-                round_type=rnd_row.round_type,
-                discipline=event_discipline.get(event_id, ""),
-                actual_rank=actual_rank,
-                expected_rank=math.nan,  # filled in by _compute_expected.
-                elo_residual=math.nan,
-            )
-        )
+    rounds_out: list[int] = [0]
+    results_out: list[int] = [0]
+    reps = _select_representative_rounds_impl(
+        session,
+        report.skipped,
+        src_rounds_out=rounds_out,
+        src_results_out=results_out,
+    )
+    report.src_rounds = rounds_out[0]
+    report.src_results = results_out[0]
     return reps
 
 
 def _mu_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
     """Map (athlete_id, round_id) → pre-event ``mu_before`` from rating_history.
 
-    Point-in-time μ as of that round, read READ-ONLY from the source store. If a
-    duplicate (athlete, round) appears, the last row in pk order wins (stable).
+    Thin wrapper around :func:`climber_network.elo.reps.mu_before_lookup`.
     """
-    out: dict[tuple[int, int], float] = {}
-    for h in pg.iter_rows(session, pg.RatingHistory):
-        assert isinstance(h, pg.RatingHistory)
-        out[(h.athlete_id, h.round_id)] = h.mu_before
-    return out
+    return _mu_before_lookup_impl(session)
 
 
 def _compute_expected(

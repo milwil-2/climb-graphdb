@@ -118,3 +118,63 @@ class TravelParams:
 
 #: Module-level singleton — import and use directly.
 TRAVEL_PARAMS: TravelParams = TravelParams()
+
+
+# ---------------------------------------------------------------------------
+# Rating-model constants (mirrored from the upstream climbing-elo ratings)
+# ---------------------------------------------------------------------------
+
+#: Logistic temperature for the Bradley-Terry / Plackett-Luce win-probability
+#: link. Copied verbatim from climbing-elo's ``GLICKO2_SCALE`` (its Glicko-2
+#: display↔internal conversion, ``= 400 / ln(10)``) so our link matches the scale
+#: on which the upstream ``mu`` ratings are expressed. Single source of truth:
+#: ``elo.expected.DEFAULT_SCALE`` and ``MonteCarloParams.scale`` both derive from
+#: this, and it is imported wherever a logistic scale is needed.
+GLICKO2_SCALE: float = 173.7178
+
+
+# ---------------------------------------------------------------------------
+# Monte-Carlo placement model constants (L3b — second outcome variable, #48)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MonteCarloParams:
+    """Immutable constants for the Monte-Carlo placement-distribution model.
+
+    The MC model produces a per-athlete PMF over finishing ranks (a *second*,
+    distributional outcome variable) alongside the exact closed-form
+    ``expected_rank`` / ``elo_residual``. It never replaces them.
+
+    Attributes:
+        n_sims:        Number of Plackett-Luce (Gumbel-sort) simulation trials
+                       per round. More trials → tighter PMF, slower run.
+        seed:          Base RNG seed. The sync derives a deterministic per-round
+                       seed from this so re-running is a logical no-op (idempotent).
+        model:         Generative model — ``"gaussian"`` (default) mirrors
+                       climbing-elo's shipped projection (perf ~ N(mu, sigma),
+                       sigma = Glicko-2 RD); ``"plackett_luce"`` is the Gumbel-sort
+                       bridge to the closed-form ``expected_rank``.
+        default_sigma: Gaussian-model performance sigma for an athlete with no
+                       rating deviation (so an unrated competitor still has a
+                       non-degenerate distribution).
+        scale:         Logistic temperature for the plackett_luce model —
+                       defaults to the module-level :data:`GLICKO2_SCALE` (the
+                       single source of truth); unused by the gaussian model.
+        sample_sigma:  Plackett-Luce only: draw ``mu_i ~ N(mu_i, sigma_i)`` per
+                       trial so rating uncertainty widens an athlete's PMF.
+        model_version: Opaque version string stamped on the MC Performance props
+                       so the graph can distinguish re-computed outputs.
+    """
+
+    n_sims: int = 20_000
+    seed: int = 12_345
+    model: str = "gaussian"
+    default_sigma: float = 350.0
+    scale: float = GLICKO2_SCALE
+    sample_sigma: bool = True
+    model_version: str = "mc-v1"
+
+
+#: Module-level singleton — import and use directly.
+MC_PARAMS: MonteCarloParams = MonteCarloParams()

@@ -30,13 +30,17 @@ Home-base resolution (documented approximation, dependency-free)
     ``City-[:IN_COUNTRY]->Country`` or a country-centroid Venue
     ``-[:IN_COUNTRY]->Country``), we take the **most common IANA timezone** and
     the **centroid** (mean longitude / latitude) of those venues' points. When
-    the country cannot be resolved to any coordinate/timezone, the leg is still
-    emitted with a low ``confidence`` and the timezone term is dropped (the
+    the graph yields no timezone for the home country (it hosts no resolved
+    venue), the timezone falls back to the country's **capital-city IANA zone**
+    (``geocode.country_capital_tz``) so the ``tz_delta_h`` term is still modelled
+    — only the distance/flight term is dropped (no coordinate). Only when even
+    the capital tz is unknown is the timezone term dropped entirely (the
     restedness falls back to travel_fatigue only, with ``tz_delta_h = 0``).
 
-    ``confidence`` is carried on every TravelLeg: lower for a ``home_base`` origin
-    (nationality proxy), higher for an observed ``prev_event`` swing leg, and
-    lowest when the home base could not be resolved at all.
+    ``confidence`` is carried on every TravelLeg: highest for an observed
+    ``prev_event`` swing leg, then a ``home_base`` with both centroid + tz, then
+    a capital-tz-only ``home_base`` (tz but no coordinate), and lowest when the
+    home base could not be resolved at all (issue #42).
 
 Arrival timing (PRD §9)
     True arrival dates are unknown, so arrival is a **parameter**:
@@ -56,6 +60,7 @@ Idempotency
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal, Protocol
@@ -64,7 +69,7 @@ import typer
 
 from climber_network import vocab
 from climber_network.config import TRAVEL_PARAMS, TravelParams
-from climber_network.geo.geocode import utc_offset_hours
+from climber_network.geo.geocode import country_capital_tz, utc_offset_hours
 from climber_network.travel.formulas import compute_restedness, haversine_km
 
 app = typer.Typer(
@@ -167,8 +172,13 @@ OriginKind = Literal["home_base", "prev_event"]
 
 #: An observed swing leg (prev_event → venue): both endpoints are real venues.
 CONFIDENCE_SWING = 0.8
-#: A home-base origin resolved from the graph (nationality-proxy country).
+#: A home-base origin resolved from the graph (nationality-proxy country) with
+#: both a centroid coordinate AND a timezone.
 CONFIDENCE_HOME_BASE = 0.4
+#: A home-base origin with a timezone but NO coordinate — e.g. the capital-city
+#: timezone fallback for a country that hosts no resolved venue (issue #42). The
+#: tz term (direction / jet-lag) is modelled; the distance / flight term is not.
+CONFIDENCE_HOME_BASE_TZ_ONLY = 0.3
 #: Home base could not be resolved (no coords/tz) — tz term dropped.
 CONFIDENCE_UNRESOLVED = 0.2
 
@@ -220,14 +230,32 @@ class TravelReport:
     origin_home_base: int = 0
     origin_prev_event: int = 0
 
-    unresolved_origin: int = 0  # leg emitted, but origin coords/tz missing.
+    unresolved_origin: int = 0  # leg emitted, but origin/venue tz missing → tz term dropped.
     skipped_no_date: int = 0  # event has no start_date → cannot place arrival.
     skipped_no_venue: int = 0  # destination venue has no coords → cannot place leg.
+
+    # Direction distribution — the issue #42 quality metric. ``none`` legs carry
+    # no timezone delta (same tz or a dropped tz term) and dilute the jet-lag
+    # signal; E/W legs are where the hypothesised effect lives.
+    direction_e: int = 0
+    direction_w: int = 0
+    direction_none: int = 0
 
     edge_traveled: int = 0
     edge_to_event: int = 0
     edge_had_state: int = 0
     edge_at_event: int = 0
+
+    def _tz_crossing_share(self) -> float:
+        """Fraction of emitted legs that cross a timezone (direction E or W).
+
+        The headline issue-#42 quality metric: the share of legs that carry a
+        non-zero ``tz_delta_h``. A low share means the jet-lag signal is being
+        diluted by ``direction=none`` legs. Returns ``0.0`` when no legs exist.
+        """
+        crossing = self.direction_e + self.direction_w
+        total = crossing + self.direction_none
+        return crossing / total if total else 0.0
 
     def log(self, console: Any) -> None:
         """Print a human-readable summary of counts."""
@@ -239,6 +267,11 @@ class TravelReport:
         console.print(
             f"  origins: home_base={self.origin_home_base} prev_event={self.origin_prev_event} "
             f"(unresolved_origin={self.unresolved_origin})"
+        )
+        console.print(
+            f"  direction: E={self.direction_e} W={self.direction_w} "
+            f"none={self.direction_none} "
+            f"(tz-crossing share={self._tz_crossing_share():.1%})"
         )
         console.print(f"  skipped: no_date={self.skipped_no_date} no_venue={self.skipped_no_venue}")
         console.print(f"  nodes: TravelLeg={self.legs} RestednessState={self.states}")
@@ -278,17 +311,27 @@ def _to_float(value: Any) -> float | None:
 
 def resolve_home_bases(
     country_rows: list[dict[str, Any]],
+    *,
+    fallback_iso3: Iterable[str] = (),
 ) -> dict[str, Place]:
     """Resolve each country's representative :class:`Place` from venue rows.
 
     For every country, take the centroid (mean longitude / latitude) of all its
     venues that carry coordinates and the **most common** IANA timezone among
-    them. A country with no coordinates and no timezone yields a :class:`Place`
-    with all-``None`` fields (treated as unresolved downstream).
+    them. When a country has venue coordinates but **no** venue timezone (or is
+    requested via *fallback_iso3* but has no venue rows at all), its timezone
+    falls back to the capital-city IANA zone from
+    :func:`~climber_network.geo.geocode.country_capital_tz` (issue #42), so a
+    home-base origin can still contribute a ``tz_delta_h`` term instead of being
+    silently dropped. Only countries whose capital tz is *also* unknown yield a
+    :class:`Place` with a ``None`` timezone (treated as unresolved downstream).
 
     Args:
         country_rows: Rows from :data:`COUNTRY_GEO_QUERY` — each has ``iso3`` and
             optional ``lon`` / ``lat`` / ``iana``.
+        fallback_iso3: Country codes (e.g. every athlete's home country) that
+            must appear in the result even when no venue rows mention them, so a
+            capital-tz-only :class:`Place` is materialised for them.
 
     Returns:
         Mapping of upper-cased ISO3 → :class:`Place`.
@@ -312,7 +355,7 @@ def resolve_home_bases(
             tzs.setdefault(iso3, Counter())[str(iana)] += 1
 
     out: dict[str, Place] = {}
-    seen = set(lons) | set(tzs)
+    seen = set(lons) | set(tzs) | {str(c).strip().upper() for c in fallback_iso3}
     for iso3 in seen:
         lon_vals = lons.get(iso3, [])
         lat_vals = lats.get(iso3, [])
@@ -321,6 +364,9 @@ def resolve_home_bases(
         tz_counter = tzs.get(iso3)
         # most_common(1) is deterministic on insertion order for ties (Counter).
         common_tz = tz_counter.most_common(1)[0][0] if tz_counter else None
+        # Capital-city fallback when the graph gave no timezone for this country.
+        if common_tz is None:
+            common_tz = country_capital_tz(iso3)
         out[iso3] = Place(lon=centroid_lon, lat=centroid_lat, tz=common_tz)
     return out
 
@@ -386,8 +432,12 @@ def _select_origin(
         if 0 <= gap_days <= params.swing_gap_days and prev.venue.tz != current.venue.tz:
             return "prev_event", prev.venue, CONFIDENCE_SWING
 
-    if home is not None and (home.has_coords or home.tz is not None):
+    if home is not None and home.has_coords:
         return "home_base", home, CONFIDENCE_HOME_BASE
+    if home is not None and home.tz is not None:
+        # Timezone known (e.g. capital-city fallback) but no coordinate: the
+        # jet-lag term is modelled, the distance term is not (issue #42).
+        return "home_base", home, CONFIDENCE_HOME_BASE_TZ_ONLY
     return "home_base", home, CONFIDENCE_UNRESOLVED
 
 
@@ -559,6 +609,13 @@ def _emit_leg_and_state(
     else:
         report.origin_prev_event += 1
 
+    if rep["direction"] == "E":
+        report.direction_e += 1
+    elif rep["direction"] == "W":
+        report.direction_w += 1
+    else:
+        report.direction_none += 1
+
 
 # ---------------------------------------------------------------------------
 # Core build logic — pure with respect to the injected client + inputs.
@@ -592,7 +649,12 @@ def build_travel(
         for row in client.run_read(ATHLETE_HOME_QUERY)
         if row.get("athlete_id") is not None and row.get("iso3")
     }
-    home_places = resolve_home_bases(client.run_read(COUNTRY_GEO_QUERY))
+    # Pass every athlete's home country as a fallback so a capital-tz-only Place
+    # is materialised even for nations that host no resolved venue (issue #42).
+    home_places = resolve_home_bases(
+        client.run_read(COUNTRY_GEO_QUERY),
+        fallback_iso3=set(homes_iso3.values()),
+    )
 
     grouped = _group_athlete_events(client.run_read(ATHLETE_EVENT_QUERY))
     report.src_athletes = len(grouped)

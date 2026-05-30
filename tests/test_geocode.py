@@ -7,13 +7,16 @@ GeoNamesIndex is built from a small in-memory fixture via ``from_records``.
 from __future__ import annotations
 
 from datetime import date
+from zoneinfo import available_timezones
 
 import pytest
 
 from climber_network.geo.geocode import (
+    COUNTRY_CAPITAL_TZ,
     GeoNamesIndex,
     GeoPoint,
     alpha2_to_alpha3,
+    country_capital_tz,
     extract_city,
     override_alpha2,
     parse_ioc_alpha2,
@@ -398,3 +401,57 @@ class TestUtcOffsetHours:
     def test_half_hour_offset(self) -> None:
         # India is UTC+5:30 year-round (no DST).
         assert utc_offset_hours("Asia/Kolkata", date(2023, 1, 1)) == 5.5
+
+
+# ---------------------------------------------------------------------------
+# Country → capital-city timezone fallback (issue #42)
+# ---------------------------------------------------------------------------
+
+
+class TestCountryCapitalTz:
+    def test_every_value_is_a_valid_iana_zone(self) -> None:
+        # Guards the curated table against typos: every value must be a real
+        # IANA zone (stdlib zoneinfo is the authority) so utc_offset_hours and
+        # the neo4j TimeZone node never receive a bogus id.
+        valid = available_timezones()
+        bad = {iso: tz for iso, tz in COUNTRY_CAPITAL_TZ.items() if tz not in valid}
+        assert bad == {}, f"invalid IANA zones in COUNTRY_CAPITAL_TZ: {bad}"
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("JPN", "Asia/Tokyo"),
+            ("USA", "America/New_York"),  # Washington DC
+            ("AUT", "Europe/Vienna"),
+            ("FRA", "Europe/Paris"),
+            ("AUS", "Australia/Sydney"),  # Canberra
+            ("RUS", "Europe/Moscow"),
+            ("KOR", "Asia/Seoul"),
+            ("SVN", "Europe/Ljubljana"),
+        ],
+    )
+    def test_known_capitals(self, code: str, expected: str) -> None:
+        assert country_capital_tz(code) == expected
+
+    def test_ioc_aliases_match_iso3(self) -> None:
+        # IOC codes that diverge from ISO3 must resolve to the same zone, since
+        # athlete nationality may arrive in either form.
+        for ioc, iso3 in [
+            ("SUI", "CHE"),
+            ("GER", "DEU"),
+            ("SLO", "SVN"),
+            ("NED", "NLD"),
+            ("IRI", "IRN"),
+            ("TPE", "TWN"),
+            ("RSA", "ZAF"),
+        ]:
+            assert country_capital_tz(ioc) == country_capital_tz(iso3)
+            assert country_capital_tz(ioc) is not None
+
+    def test_case_insensitive_and_whitespace(self) -> None:
+        assert country_capital_tz("  jpn ") == "Asia/Tokyo"
+
+    def test_unknown_and_empty_return_none(self) -> None:
+        assert country_capital_tz("ZZZ") is None
+        assert country_capital_tz("") is None
+        assert country_capital_tz(None) is None

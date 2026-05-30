@@ -24,6 +24,7 @@ from sync.travel import (
     ATHLETE_EVENT_QUERY,
     ATHLETE_HOME_QUERY,
     CONFIDENCE_HOME_BASE,
+    CONFIDENCE_HOME_BASE_TZ_ONLY,
     CONFIDENCE_SWING,
     CONFIDENCE_UNRESOLVED,
     COUNTRY_GEO_QUERY,
@@ -332,7 +333,8 @@ def test_resolve_home_bases_tz_only_country() -> None:
 
 
 def test_unresolved_home_base_low_confidence_and_zero_tz() -> None:
-    # Athlete 3 is based in a country (XKX) with NO geography rows → unresolved.
+    # Athlete 3 is based in a country with NO geography rows AND no capital-tz
+    # entry ("ZZZ" is not a real country) → genuinely unresolved.
     event_rows = [
         {
             "athlete_id": 3,
@@ -343,12 +345,12 @@ def test_unresolved_home_base_low_confidence_and_zero_tz() -> None:
             "venue_tz": "Europe/Vienna",
         }
     ]
-    home_rows = [{"athlete_id": 3, "iso3": "XKX"}]
+    home_rows = [{"athlete_id": 3, "iso3": "ZZZ"}]
     client = FakeGraphClient(
         read_results={
             ATHLETE_EVENT_QUERY: event_rows,
             ATHLETE_HOME_QUERY: home_rows,
-            COUNTRY_GEO_QUERY: _COUNTRY_ROWS,  # has no XKX row.
+            COUNTRY_GEO_QUERY: _COUNTRY_ROWS,  # has no ZZZ row.
         }
     )
     report = build_travel(client)
@@ -362,6 +364,62 @@ def test_unresolved_home_base_low_confidence_and_zero_tz() -> None:
     assert leg["direction"] == "none"
     assert leg["distance_km"] == 0.0
     assert report.unresolved_origin == 1
+
+
+def test_home_base_capital_tz_fallback_resolves_direction() -> None:
+    """Issue #42: a home country that hosts no resolved venue still gets a
+    timezone from the capital-city fallback, so the leg crosses a timezone
+    (direction E/W) instead of collapsing to ``none``/unresolved.
+
+    Athlete 30 is based in IRN (Asia/Tehran, UTC+3:30) — absent from the country
+    geography rows — and competes in Vienna (UTC+2 in summer). The westward shift
+    must be modelled even though IRN has no venue coordinate in the graph.
+    """
+    event_rows = [
+        {
+            "athlete_id": 30,
+            "event_id": 300,
+            "start_date": "2024-06-01",
+            "venue_lon": 16.37,
+            "venue_lat": 48.21,
+            "venue_tz": "Europe/Vienna",
+        }
+    ]
+    home_rows = [{"athlete_id": 30, "iso3": "IRN"}]
+    client = FakeGraphClient(
+        read_results={
+            ATHLETE_EVENT_QUERY: event_rows,
+            ATHLETE_HOME_QUERY: home_rows,
+            COUNTRY_GEO_QUERY: _COUNTRY_ROWS,  # has no IRN row.
+        }
+    )
+    report = build_travel(client)
+
+    leg = client.nodes[vocab.leg(vocab.ath(30), vocab.evt(300))]
+    assert leg["origin"] == "home_base"
+    # tz known but no coordinate → the dedicated tz-only confidence tier.
+    assert leg["confidence"] == CONFIDENCE_HOME_BASE_TZ_ONLY
+    assert leg["origin_tz"] == "Asia/Tehran"
+    # Tehran (UTC+3:30) → Vienna (UTC+2) is a westward shift, now modelled.
+    assert leg["direction"] == "W"
+    assert leg["tz_delta_h"] < 0
+    # No origin coordinate → distance/flight term stays zero (honest).
+    assert leg["distance_km"] == 0.0
+    # The leg is no longer counted as an unresolved origin.
+    assert report.unresolved_origin == 0
+
+
+def test_direction_tallies_and_tz_crossing_share() -> None:
+    client = _client()
+    report = build_travel(client)
+
+    # Every emitted leg is classified into exactly one direction bucket.
+    assert report.direction_e + report.direction_w + report.direction_none == report.legs
+    # The fixture has athletes crossing timezones (USA→Europe/Asia) and a
+    # same-tz Japan swing, so both crossing and none buckets are populated.
+    assert report.direction_e + report.direction_w >= 1
+    assert report.direction_none >= 1
+    assert 0.0 < report._tz_crossing_share() < 1.0
 
 
 # ---------------------------------------------------------------------------

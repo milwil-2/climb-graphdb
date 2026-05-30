@@ -188,6 +188,23 @@ def test_country_centroid_fallback_with_point() -> None:
     assert venue["location"].latitude == -7.25
 
 
+def test_country_centroid_fallback_gets_capital_timezone() -> None:
+    # Issue #42: the FRA centroid Venue carries the capital-city tz (Europe/Paris)
+    # so the L3 travel build can still compute a tz_delta for legs touching it,
+    # instead of dropping the timezone term.
+    client = _client()
+    report = build_geo(client, _index())
+
+    ven_id = vocab.ven("country-fra")
+    tz_id = vocab.tz("Europe/Paris")
+    assert client.node_labels[tz_id] == "TimeZone"
+    assert client.nodes[tz_id]["iana"] == "Europe/Paris"
+    assert (ven_id, "IN_TIMEZONE", tz_id) in client.rels
+    # One fallback event (Atlantis/FRA) and its centroid got a tz.
+    assert report.fallback_events == 1
+    assert report.fallback_with_tz == 1
+
+
 def test_event_without_city_or_country_is_skipped() -> None:
     client = _client()
     report = build_geo(client, _index())

@@ -16,14 +16,21 @@ The headline season signals are:
 * ``over_under`` — the cumulative **signed** under-performance: the sum of the
   available ``elo_residual`` values. Positive means the athlete finished worse
   than the model expected across the season (under-performed); negative means
-  they over-performed.
+  they over-performed. This scales with the number of events, so it is a
+  legitimate "total damage" measure but volume-biased.
+* ``mean_over_under`` — the per-event-normalized companion (``over_under /
+  n_events``). This removes the volume bias so seasons are comparable
+  regardless of how many events the athlete entered, and is the right quantity
+  to rank by and to correlate against the per-event ``mean_rested_index``.
 * ``n_upsets`` — how many appearances were genuine upsets (``surprisal`` above a
   threshold).
 
-A driver report then correlates each athlete-season's ``over_under`` against its
-``mean_rested_index`` to test the project's standing hypothesis: a less-rested
-season (more jet-lag / travel load) should coincide with more under-performance,
-i.e. a *negative* correlation.
+A driver report then correlates each athlete-season's ``mean_over_under``
+against its ``mean_rested_index`` to test the project's standing hypothesis: a
+less-rested season (more jet-lag / travel load) should coincide with more
+under-performance, i.e. a *negative* correlation. The per-event-normalized
+``mean_over_under`` (not the volume-biased ``over_under`` sum) is used so the
+correlation isn't distorted by how many events each athlete entered.
 
 This module is pure stdlib: it never imports ``climbing_elo`` /
 ``knowledge_graph`` and performs no I/O. The integration layer that reads the
@@ -81,8 +88,11 @@ class SeasonAggregate:
     the corresponding field across the season's records; a rollup with no usable
     data is ``None``. ``over_under`` is the cumulative signed under-performance
     (sum of the available ``elo_residual`` values — positive = the athlete
-    underperformed across the season). ``n_upsets`` counts appearances whose
-    ``surprisal`` exceeds the upset threshold.
+    underperformed across the season); ``mean_over_under`` is its
+    per-event-normalized companion (``over_under / n_events``, or ``0.0`` when
+    the season has no events) used for volume-fair ranking and correlation.
+    ``n_upsets`` counts appearances whose ``surprisal`` exceeds the upset
+    threshold.
     """
 
     athlete_id: str
@@ -97,6 +107,7 @@ class SeasonAggregate:
     mean_rested_index: float | None
     n_upsets: int
     over_under: float
+    mean_over_under: float
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +141,10 @@ def aggregate_seasons(
 
     Every ``mean_*`` / ``season_*`` field is the mean of the non-None values of
     its source field within the group (``None`` when none are present).
-    ``over_under`` is the sum of the available ``elo_residual`` values.
-    ``n_upsets`` is the count of records whose ``surprisal`` is not ``None`` and
+    ``over_under`` is the sum of the available ``elo_residual`` values, and
+    ``mean_over_under`` is that sum divided by ``n_events`` (``0.0`` when the
+    group is empty). ``n_upsets`` is the count of records whose ``surprisal`` is
+    not ``None`` and
     strictly greater than *upset_threshold*.
 
     The result is sorted by (athlete_id, season, discipline) for determinism.
@@ -146,12 +159,14 @@ def aggregate_seasons(
         n_upsets = sum(
             1 for rec in members if rec.surprisal is not None and rec.surprisal > upset_threshold
         )
+        n_events = len(members)
+        over_under = sum(residuals)
         aggregates.append(
             SeasonAggregate(
                 athlete_id=athlete_id,
                 season=season,
                 discipline=discipline,
-                n_events=len(members),
+                n_events=n_events,
                 mean_elo_residual=_mean(residuals),
                 mean_result_percentile=_mean(_collect(members, "result_percentile")),
                 mean_surprisal=_mean(_collect(members, "surprisal")),
@@ -159,7 +174,8 @@ def aggregate_seasons(
                 season_consistency=_mean(_collect(members, "rank_std")),
                 mean_rested_index=_mean(_collect(members, "rested_index")),
                 n_upsets=n_upsets,
-                over_under=sum(residuals),
+                over_under=over_under,
+                mean_over_under=(over_under / n_events) if n_events > 0 else 0.0,
             )
         )
 
@@ -173,19 +189,24 @@ def aggregate_seasons(
 
 
 def _drivers_block(aggregates: list[SeasonAggregate]) -> dict[str, Any]:
-    """Pearson(over_under, mean_rested_index) over aggregates that have both."""
+    """Pearson(mean_over_under, mean_rested_index) over aggregates that have both.
+
+    The per-event-normalized ``mean_over_under`` (not the volume-biased
+    ``over_under`` sum) is correlated against the per-event ``mean_rested_index``
+    so the two series are on the same per-event footing.
+    """
     xs: list[float] = []
     ys: list[float] = []
     for agg in aggregates:
         if agg.mean_rested_index is None:
             continue
         xs.append(agg.mean_rested_index)
-        ys.append(agg.over_under)
+        ys.append(agg.mean_over_under)
     return {"pearson_r": pearson(xs, ys), "n": len(xs)}
 
 
 def season_drivers_report(aggregates: list[SeasonAggregate]) -> dict[str, Any]:
-    """Correlate season ``over_under`` against ``mean_rested_index``.
+    """Correlate season ``mean_over_under`` against ``mean_rested_index``.
 
     Returns the structured shape::
 
@@ -196,7 +217,9 @@ def season_drivers_report(aggregates: list[SeasonAggregate]) -> dict[str, Any]:
         }
 
     Only athlete-seasons that carry a ``mean_rested_index`` contribute (the y
-    value, ``over_under``, is always present). A *negative* correlation is the
+    value, ``mean_over_under``, is always present). The per-event-normalized
+    ``mean_over_under`` is used (not the volume-biased ``over_under`` sum) so the
+    correlation isn't distorted by event count. A *negative* correlation is the
     success signal: a less-rested season should coincide with more
     under-performance.
     """

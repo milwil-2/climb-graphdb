@@ -141,6 +141,7 @@ _SEASON_DRIVERS_ROWS = [
         "season": 2024,
         "discipline": "L",
         "over_under": 4.0,
+        "mean_over_under": 0.8,
         "mean_rested_index": 0.55,
         "season_skill": 0.3,
         "season_consistency": 1.2,
@@ -379,7 +380,14 @@ def test_season_drivers_happy_path(client: TestClient) -> None:
     assert row["season"] == 2024
     assert row["discipline"] == "L"
     assert row["over_under"] == pytest.approx(4.0)
+    assert row["mean_over_under"] == pytest.approx(0.8)
     assert row["mean_rested_index"] == pytest.approx(0.55)
+
+
+def test_season_drivers_orders_by_normalized_over_under() -> None:
+    """Ranking uses the volume-fair mean_over_under, not the cumulative sum."""
+    assert "ORDER BY s.mean_over_under DESC" in queries.SEASON_DRIVERS_CYPHER
+    assert "ORDER BY s.over_under DESC" not in queries.SEASON_DRIVERS_CYPHER
 
 
 def test_season_drivers_no_data_returns_empty(client: TestClient) -> None:

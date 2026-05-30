@@ -351,18 +351,22 @@ def jetlagged_underperformers() -> list[dict[str, Any]]:
 # less rested that season?). Reads the SeasonSummary nodes built by sync.season.
 # ---------------------------------------------------------------------------
 
-#: Athlete-season summaries ranked by most under-performing first (over_under > 0
-#: ⇒ finished worse than expected across the season), with the season's mean
-#: rested_index alongside so the jet-lag link is visible at season granularity.
+#: Athlete-season summaries ranked by most under-performing first, using the
+#: per-event-normalized ``mean_over_under`` (> 0 ⇒ finished worse than expected
+#: per event) so the ranking isn't volume-biased toward athletes who entered
+#: more events. The cumulative ``over_under`` sum is still surfaced as a "total
+#: damage" measure, alongside the season's mean rested_index so the jet-lag link
+#: is visible at season granularity.
 SEASON_DRIVERS_CYPHER = (
     f"MATCH (a:{_ATHLETE})-[:{_HAD_SEASON}]->(s:{_SEASON}) "
-    "WHERE s.over_under IS NOT NULL "
+    "WHERE s.mean_over_under IS NOT NULL "
     "RETURN a.id AS athlete_id, a.name AS athlete_name, "
     "s.season AS season, s.discipline AS discipline, "
-    "s.over_under AS over_under, s.mean_rested_index AS mean_rested_index, "
+    "s.over_under AS over_under, s.mean_over_under AS mean_over_under, "
+    "s.mean_rested_index AS mean_rested_index, "
     "s.season_skill AS season_skill, s.season_consistency AS season_consistency, "
     "s.n_events AS n_events, s.n_upsets AS n_upsets "
-    "ORDER BY s.over_under DESC "
+    "ORDER BY s.mean_over_under DESC "
     "LIMIT $limit"
 )
 
@@ -381,6 +385,7 @@ def season_drivers() -> list[dict[str, Any]]:
             "season": r.get("season"),
             "discipline": r.get("discipline"),
             "over_under": r.get("over_under"),
+            "mean_over_under": r.get("mean_over_under"),
             "mean_rested_index": r.get("mean_rested_index"),
             "season_skill": r.get("season_skill"),
             "season_consistency": r.get("season_consistency"),

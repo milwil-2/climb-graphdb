@@ -90,9 +90,22 @@ def build_calibration_report(
 ) -> dict[str, Any]:
     """Compute the randomized-PIT calibration report, overall + by discipline.
 
-    Deterministic given ``seed`` (the randomized PIT draws one uniform per row).
+    Deterministic given ``seed``: rows are sorted by a stable key before the
+    per-row PIT draw, so the report does not depend on Neo4j's (unspecified) row
+    order.
     """
     rows = client.run_read(CALIBRATION_QUERY)
+    # Stable order so the per-row randomized-PIT draws are reproducible regardless
+    # of the order Neo4j returns the Performance rows in.
+    rows = sorted(
+        rows,
+        key=lambda r: (
+            r.get("result_percentile") is None,
+            r.get("result_percentile") or 0.0,
+            r.get("surprisal") or 0.0,
+            str(r.get("discipline") or ""),
+        ),
+    )
     rng = random.Random(seed)  # noqa: S311  # nosec B311 - PIT jitter, not security
     pits: list[float] = []
     by_discipline: dict[str, list[float]] = defaultdict(list)

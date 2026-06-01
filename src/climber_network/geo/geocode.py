@@ -499,9 +499,12 @@ class GeoNamesIndex:
 #     an explicit alpha-2 constraint.
 #   * pin — the name is fine but we force the country (e.g. Navi Mumbai → IN) to
 #     skip ambiguity.
-#   * absent — the city is not in cities1000 at all (Wujiang, Keqiao). We supply
-#     explicit coordinates + IANA timezone; ``geonameid`` is a 0 sentinel since
-#     GeoNames has no id for it.
+#   * absent — the city is not in cities1000 at all (Wujiang, Keqiao, Bali). We
+#     supply explicit coordinates + IANA timezone. Each carries a **unique,
+#     non-zero** ``geonameid`` (the real GeoNames id for the place, or its host
+#     city): City nodes are keyed ``vocab.city(geonameid)``, so a shared id would
+#     MERGE distinct cities into one node (issue #47). ``_validate_overrides``
+#     enforces uniqueness so a ``0``/duplicate can't reintroduce the collision.
 
 
 @dataclass(frozen=True)
@@ -535,7 +538,7 @@ _CITY_OVERRIDES: dict[str, _Override] = {
         point=GeoPoint(
             lat=31.1592,
             lon=120.6371,
-            geonameid=0,
+            geonameid=1791388,  # GeoNames: Wujiang, Jiangsu
             name="Wujiang",
             timezone="Asia/Shanghai",
         ),
@@ -545,7 +548,7 @@ _CITY_OVERRIDES: dict[str, _Override] = {
         point=GeoPoint(
             lat=30.0813,
             lon=120.4889,
-            geonameid=0,
+            geonameid=1791236,  # GeoNames: Shaoxing (Keqiao is its district)
             name="Keqiao",
             timezone="Asia/Shanghai",
         ),
@@ -557,12 +560,42 @@ _CITY_OVERRIDES: dict[str, _Override] = {
         point=GeoPoint(
             lat=-8.65,
             lon=115.2167,
-            geonameid=0,
+            geonameid=1645528,  # GeoNames: Denpasar (Bali island host city)
             name="Bali",
             timezone="Asia/Makassar",
         ),
     ),
 }
+
+
+def _validate_overrides(overrides: dict[str, _Override]) -> None:
+    """Reject the #47 collision in the absent-city override table.
+
+    Each absent-city override supplies an explicit :class:`GeoPoint` whose
+    ``geonameid`` keys the City node (``vocab.city(geonameid)``). A ``0``
+    sentinel or a reused id would MERGE distinct cities into one node (the
+    Bali↔Wujiang↔Keqiao bug). Run at import so a future bad edit fails fast.
+    """
+    seen: dict[int, str] = {}
+    for key, override in overrides.items():
+        point = override.point
+        if point is None:
+            continue
+        gid = point.geonameid
+        if gid == 0:
+            raise ValueError(
+                f"absent-city override {key!r} uses sentinel geonameid=0; "
+                "assign a unique non-zero GeoNames id (issue #47)"
+            )
+        if gid in seen:
+            raise ValueError(
+                f"absent-city overrides {seen[gid]!r} and {key!r} share "
+                f"geonameid={gid}; ids must be unique (issue #47)"
+            )
+        seen[gid] = key
+
+
+_validate_overrides(_CITY_OVERRIDES)
 
 
 # ---------------------------------------------------------------------------

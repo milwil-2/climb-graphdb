@@ -24,6 +24,7 @@ from climber_network.geo.geocode import (
     tz_for,
     utc_offset_hours,
 )
+from climber_network.geo.geocode import _CITY_OVERRIDES, _Override, _validate_overrides
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -455,3 +456,42 @@ class TestCountryCapitalTz:
         assert country_capital_tz("ZZZ") is None
         assert country_capital_tz("") is None
         assert country_capital_tz(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Absent-city override-table integrity (issue #47)
+# ---------------------------------------------------------------------------
+
+
+class TestCityOverridesIntegrity:
+    def test_absent_city_geonameids_are_unique_and_nonzero(self) -> None:
+        # City nodes are keyed by ``vocab.city(geonameid)``, so two absent-city
+        # overrides sharing a ``geonameid`` (the old ``0`` sentinel) MERGE into a
+        # single City node — that's the Bali↔Wujiang↔Keqiao collision of #47.
+        ids = [ov.point.geonameid for ov in _CITY_OVERRIDES.values() if ov.point is not None]
+        assert all(gid != 0 for gid in ids), "absent-city override still uses geonameid=0"
+        assert len(ids) == len(set(ids)), f"absent-city overrides share a geonameid: {ids}"
+
+    def test_validate_overrides_accepts_the_real_table(self) -> None:
+        # The shipped table must satisfy its own guard.
+        _validate_overrides(_CITY_OVERRIDES)
+
+    def test_validate_overrides_rejects_zero_sentinel(self) -> None:
+        bad = {
+            "x": _Override(
+                alpha2="CN",
+                point=GeoPoint(lat=0.0, lon=0.0, geonameid=0, name="X", timezone="UTC"),
+            ),
+        }
+        with pytest.raises(ValueError, match="geonameid"):
+            _validate_overrides(bad)
+
+    def test_validate_overrides_rejects_duplicate_geonameid(self) -> None:
+        dup = GeoPoint(lat=1.0, lon=2.0, geonameid=42, name="A", timezone="UTC")
+        dup2 = GeoPoint(lat=3.0, lon=4.0, geonameid=42, name="B", timezone="UTC")
+        bad = {
+            "a": _Override(alpha2="CN", point=dup),
+            "b": _Override(alpha2="ID", point=dup2),
+        }
+        with pytest.raises(ValueError, match="42"):
+            _validate_overrides(bad)

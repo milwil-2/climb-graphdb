@@ -24,6 +24,7 @@ from climber_network.elo.reps import (
     ROUND_DEPTH,
     RepRound,
     mu_before_lookup,
+    round_rosters,
     select_representative_rounds,
     sigma_before_lookup,
 )
@@ -500,3 +501,119 @@ def test_sigma_differs_from_mu(source_session: pg.Session) -> None:
     # Values must differ (sigma_before != mu_before in all seeded rows).
     for key in mu_map:
         assert mu_map[key] != sigma_map[key], f"Expected mu != sigma for key {key}"
+
+
+# ---------------------------------------------------------------------------
+# round_rosters — full per-round field (#63).
+# ---------------------------------------------------------------------------
+
+
+def test_round_rosters_includes_every_athlete_in_the_round(source_session: pg.Session) -> None:
+    """The roster is the FULL field, independent of representative-round assignment.
+
+    Athletes 1–3 advance past qualification (their rep round is deeper), but the
+    qualification roster must still contain all four — that is the #63 fix: a
+    shallow round is not truncated to just the athletes eliminated there.
+    """
+    _seed(source_session)
+    mu_before = mu_before_lookup(source_session)
+    rosters = round_rosters(source_session, mu_before)
+
+    # Round 1 (qualification): all four athletes, each with their round-1 mu_before.
+    assert dict(rosters[1]) == {1: 1700.0, 2: 1500.0, 3: 1450.0, 4: 1400.0}
+    # Round 2 (semi): athletes 1, 2, 3. Round 3 (final): athletes 1, 2.
+    assert {aid for aid, _ in rosters[2]} == {1, 2, 3}
+    assert {aid for aid, _ in rosters[3]} == {1, 2}
+
+
+def test_round_rosters_skips_dns_null_rank_and_missing_mu(source_session: pg.Session) -> None:
+    """A roster entry needs a finishing rank (not DNS) AND a point-in-time mu_before."""
+    session = source_session
+    session.add_all(
+        [
+            pg.Athlete(id=1, name="Ada", gender="F", nationality="USA"),
+            pg.Athlete(id=2, name="Bea", gender="F", nationality="GBR"),
+            pg.Athlete(id=3, name="Cleo", gender="F", nationality="JPN"),
+        ]
+    )
+    session.add(
+        pg.Event(
+            id=1,
+            name="E",
+            tier="world_cup",
+            country="AUT",
+            season=2024,
+            start_date=date(2024, 6, 1),
+            discipline="L",
+        )
+    )
+    session.add(pg.Round(id=1, event_id=1, round_type="qualification", gender="F", athlete_count=3))
+    session.add_all(
+        [
+            pg.Result(id=1, round_id=1, athlete_id=1, rank=1),  # ok
+            pg.Result(id=2, round_id=1, athlete_id=2, rank=None),  # null rank → skipped
+            pg.Result(id=3, round_id=1, athlete_id=3, rank=2, dns=True),  # DNS → skipped
+        ]
+    )
+    # Athlete 1 has mu_before; nobody else matters (they're filtered first anyway).
+    session.add(
+        pg.RatingHistory(
+            id=1,
+            athlete_id=1,
+            event_id=1,
+            round_id=1,
+            mu_before=1500.0,
+            mu_after=1505.0,
+            sigma_before=100.0,
+            sigma_after=99.0,
+        )
+    )
+    session.commit()
+
+    rosters = round_rosters(session, mu_before_lookup(session))
+    assert dict(rosters[1]) == {1: 1500.0}
+
+
+def test_round_rosters_drops_athlete_without_mu_before(source_session: pg.Session) -> None:
+    """An athlete with a finishing rank but no rating_history row is not in the roster."""
+    session = source_session
+    session.add_all(
+        [
+            pg.Athlete(id=1, name="Ada", gender="F", nationality="USA"),
+            pg.Athlete(id=2, name="Bea", gender="F", nationality="GBR"),
+        ]
+    )
+    session.add(
+        pg.Event(
+            id=1,
+            name="E",
+            tier="world_cup",
+            country="AUT",
+            season=2024,
+            start_date=date(2024, 6, 1),
+            discipline="L",
+        )
+    )
+    session.add(pg.Round(id=1, event_id=1, round_type="qualification", gender="F", athlete_count=2))
+    session.add_all(
+        [
+            pg.Result(id=1, round_id=1, athlete_id=1, rank=1),
+            pg.Result(id=2, round_id=1, athlete_id=2, rank=2),  # no mu_before → dropped
+        ]
+    )
+    session.add(
+        pg.RatingHistory(
+            id=1,
+            athlete_id=1,
+            event_id=1,
+            round_id=1,
+            mu_before=1500.0,
+            mu_after=1505.0,
+            sigma_before=100.0,
+            sigma_after=99.0,
+        )
+    )
+    session.commit()
+
+    rosters = round_rosters(session, mu_before_lookup(session))
+    assert dict(rosters[1]) == {1: 1500.0}

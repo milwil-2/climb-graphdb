@@ -136,6 +136,26 @@ def test_mc_props_stamped_on_representative_performances(source_session: pg.Sess
         assert props["surprisal"] >= 0.0
 
 
+def test_shallow_round_simulated_against_full_field(source_session: pg.Session) -> None:
+    """#63 regression: the qualification PMF is over the full field, not just non-advancers.
+
+    Athlete 4 is the weakest climber and the only one whose representative round is
+    the qualification (athletes 1–3 advanced). The buggy behaviour simulated athlete
+    4 alone (rep-partitioned roster), giving the degenerate distribution
+    expected_rank_mc == 1.0 / p_win == 1.0 / rank_std == 0.0. The fix simulates all
+    four, so the weakest athlete is correctly the favourite to place last.
+    """
+    _seed(source_session)
+    client = FakeGraphClient()
+    monte_carlo(client, source_session, params=_PARAMS_GAUSS)
+
+    props = client.nodes[_perf_id(1, 4)]  # athlete 4, qualification rep
+    # Weakest of a four-athlete field: expected near the back, not alone-at-1.
+    assert props["expected_rank_mc"] > 2.5
+    assert props["p_win"] < 0.1  # near-zero, NOT the buggy 1.0
+    assert props["rank_std"] > 0.0  # a real distribution, NOT a point mass
+
+
 def test_expected_rank_mc_converges_to_closed_form(source_session: pg.Session) -> None:
     _seed(source_session)
     client = FakeGraphClient()

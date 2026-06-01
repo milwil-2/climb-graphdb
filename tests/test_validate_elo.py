@@ -239,6 +239,38 @@ def test_expected_rank_matches_pure_formula(source_session: pg.Session) -> None:
     assert by_athlete[2].elo_residual < 0
 
 
+def test_shallow_round_roster_is_full_field(source_session: pg.Session) -> None:
+    """#63 regression: a qualification/semi round is scored against the FULL field.
+
+    Athletes 1–3 advance, so their representative round is deeper; only athlete 4's
+    representative round is the qualification (round 1). The buggy behaviour scored
+    athlete 4 against a roster of *just athlete 4* (rep-partitioned), yielding
+    expected_rank == 1.0 despite finishing last in a field of four. The fix scores
+    every advancer back into the qualification roster.
+    """
+    _seed(source_session)
+    client = FakeGraphClient()
+    report = validate_elo(client, source_session)
+    by_athlete = {rep.athlete_id: rep for rep in report.reps}
+
+    # Qualification (round 1) full field with its round-1 mu_before.
+    qual_roster = [("1", 1700.0), ("2", 1500.0), ("3", 1450.0), ("4", 1400.0)]
+    qual_expected = expected_finish_ranks(qual_roster)
+
+    # Athlete 4's rep IS the qualification round — scored over the full 4-athlete field.
+    assert by_athlete[4].round_id == 1
+    assert by_athlete[4].expected_rank == pytest.approx(qual_expected["4"])
+    assert by_athlete[4].expected_rank > 1.0  # NOT the buggy alone-in-roster value
+    # Lowest-rated, finished last → close-to-zero residual (model basically right).
+    assert by_athlete[4].elo_residual == pytest.approx(4.0 - qual_expected["4"])
+
+    # Athlete 3's rep is the semi (round 2): full 3-athlete semi field.
+    semi_roster = [("1", 1710.0), ("2", 1495.0), ("3", 1445.0)]
+    semi_expected = expected_finish_ranks(semi_roster)
+    assert by_athlete[3].round_id == 2
+    assert by_athlete[3].expected_rank == pytest.approx(semi_expected["3"])
+
+
 def test_derived_props_written_to_correct_performance_ids(source_session: pg.Session) -> None:
     _seed(source_session)
     client = FakeGraphClient()

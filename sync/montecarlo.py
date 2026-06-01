@@ -50,6 +50,7 @@ from climber_network.config import MC_PARAMS, MonteCarloParams
 from climber_network.elo.reps import (
     RepRound,
     mu_before_lookup,
+    round_rosters,
     select_representative_rounds,
     sigma_before_lookup,
 )
@@ -172,15 +173,18 @@ def compute_monte_carlo(
     reps: list[RepRound],
     mu_before: dict[tuple[int, int], float],
     sigma_before: dict[tuple[int, int], float],
+    rosters: dict[int, list[tuple[int, float]]],
     report: McReport,
     *,
     params: MonteCarloParams = MC_PARAMS,
 ) -> list[McRep]:
     """Simulate each representative round's PMF and derive per-rep MC outcomes.
 
-    The roster for a round is every athlete in that *same round* who has a
-    ``mu_before`` (so the simulated field matches the actual field). Reps whose
-    own ``mu_before`` is missing are skipped and reported.
+    The simulated field for a round is the **full roster** — every athlete with a
+    finishing rank + ``mu_before`` in that round (:func:`~climber_network.elo.reps.round_rosters`),
+    not just the reps whose representative round it is, so the simulated field
+    matches the actual field even when most of the round advanced deeper (#63).
+    Reps whose own ``mu_before`` is missing are skipped and reported.
     """
     round_reps: dict[int, list[RepRound]] = defaultdict(list)
     for rep in reps:
@@ -190,13 +194,10 @@ def compute_monte_carlo(
     for round_id, members in round_reps.items():
         roster: list[tuple[str, float]] = []
         sigmas: dict[str, float] = {}
-        for rep in members:
-            mu = mu_before.get((rep.athlete_id, round_id))
-            if mu is None:
-                continue
-            aid = str(rep.athlete_id)
+        for athlete_id, mu in rosters.get(round_id, []):
+            aid = str(athlete_id)
             roster.append((aid, mu))
-            sig = sigma_before.get((rep.athlete_id, round_id))
+            sig = sigma_before.get((athlete_id, round_id))
             if sig is not None:
                 sigmas[aid] = sig
         if not roster:
@@ -337,7 +338,8 @@ def monte_carlo(
 
     mu_before = mu_before_lookup(session)
     sigma_before = sigma_before_lookup(session)
-    mc_reps = compute_monte_carlo(reps, mu_before, sigma_before, report, params=params)
+    rosters = round_rosters(session, mu_before)
+    mc_reps = compute_monte_carlo(reps, mu_before, sigma_before, rosters, report, params=params)
     report.rep_rounds = len(mc_reps)
     report.reps = mc_reps
 

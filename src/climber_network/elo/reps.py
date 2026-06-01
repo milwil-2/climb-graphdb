@@ -24,6 +24,7 @@ but must NEVER import ``climbing_elo`` or ``knowledge_graph``.
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 
@@ -33,6 +34,7 @@ __all__ = [
     "ROUND_DEPTH",
     "RepRound",
     "select_representative_rounds",
+    "round_rosters",
     "mu_before_lookup",
     "sigma_before_lookup",
 ]
@@ -198,6 +200,56 @@ def select_representative_rounds(
             )
         )
     return reps
+
+
+# ---------------------------------------------------------------------------
+# Full per-round field (the simulation / expected-rank roster).
+# ---------------------------------------------------------------------------
+
+
+def round_rosters(
+    session: pg.Session,
+    mu_before: dict[tuple[int, int], float],
+) -> dict[int, list[tuple[int, float]]]:
+    """Map ``round_id`` → the full field of ``(athlete_id, mu_before)`` for that round.
+
+    The roster is **every** athlete who recorded a finishing rank (not a DNS) in
+    that round and has a point-in-time ``mu_before`` — independent of which round
+    is each athlete's *representative* (deepest) round. This is the field an
+    athlete's ``actual_rank`` is measured against, so the closed-form
+    ``expected_rank`` and the Monte-Carlo PMF must both be computed over it.
+
+    This is deliberately distinct from grouping :class:`RepRound` objects by
+    ``round_id``: a rep is assigned to its *deepest* round only, so grouping reps
+    would drop every athlete who advanced from a qualification/semifinal round,
+    truncating the shallower round's field to just the eliminated athletes (#63).
+
+    Duplicate ``(athlete, round)`` result rows resolve to the last in primary-key
+    order (stable, because :func:`iter_rows` yields in pk order), matching
+    :func:`mu_before_lookup`.
+
+    Parameters
+    ----------
+    session:
+        A read-only SQLAlchemy session bound to the source (climbing-elo) database.
+    mu_before:
+        The ``(athlete_id, round_id) → mu_before`` map from :func:`mu_before_lookup`.
+
+    Returns
+    -------
+    dict[int, list[tuple[int, float]]]
+        Per round, the list of ``(athlete_id, mu_before)`` making up the full field.
+    """
+    by_athlete: dict[int, dict[int, float]] = defaultdict(dict)
+    for res in pg.iter_rows(session, pg.Result):
+        assert isinstance(res, pg.Result)
+        if res.dns or res.rank is None:
+            continue
+        mu = mu_before.get((res.athlete_id, res.round_id))
+        if mu is None:
+            continue
+        by_athlete[res.round_id][res.athlete_id] = mu
+    return {round_id: list(athletes.items()) for round_id, athletes in by_athlete.items()}
 
 
 # ---------------------------------------------------------------------------

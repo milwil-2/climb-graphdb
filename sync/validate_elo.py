@@ -54,6 +54,7 @@ from climber_network import vocab
 from climber_network.elo.expected import DEFAULT_SCALE, expected_finish_ranks
 from climber_network.elo.reps import RepRound
 from climber_network.elo.reps import mu_before_lookup as _mu_before_lookup_impl
+from climber_network.elo.reps import round_rosters as _round_rosters_impl
 from climber_network.elo.reps import (
     select_representative_rounds as _select_representative_rounds_impl,
 )
@@ -183,32 +184,42 @@ def _mu_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
     return _mu_before_lookup_impl(session)
 
 
+def _round_rosters(
+    session: pg.Session,
+    mu_before: dict[tuple[int, int], float],
+) -> dict[int, list[tuple[int, float]]]:
+    """Map round_id → the full ``(athlete_id, mu_before)`` field for that round.
+
+    Thin wrapper around :func:`climber_network.elo.reps.round_rosters`.
+    """
+    return _round_rosters_impl(session, mu_before)
+
+
 def _compute_expected(
     reps: list[RepRound],
     mu_before: dict[tuple[int, int], float],
+    rosters: dict[int, list[tuple[int, float]]],
     report: ValidateReport,
     *,
     scale: float = DEFAULT_SCALE,
 ) -> list[RepRound]:
     """Fill ``expected_rank`` / ``elo_residual`` on each representative round.
 
-    The roster for a representative round is every athlete in that *same round*
-    who also has a ``mu_before`` (so the expected-rank field matches the actual
-    field). Reps whose own ``mu_before`` is missing are dropped (reported).
+    The roster for a round is the **full field** — every athlete with a finishing
+    rank + ``mu_before`` in that round (:func:`~climber_network.elo.reps.round_rosters`),
+    not just the reps whose representative round it is. That keeps the expected-rank
+    field matching the actual field even when most of the round advanced to a deeper
+    one (#63). Reps whose own ``mu_before`` is missing are dropped (reported).
     """
     # Group the chosen reps by their round. A round may host reps for several
-    # athletes; the roster (athletes-with-mu in that round) is shared across them.
+    # athletes; the (full-field) roster for that round is shared across them.
     round_reps: dict[int, list[RepRound]] = defaultdict(list)
     for rep in reps:
         round_reps[rep.round_id].append(rep)
 
     completed: list[RepRound] = []
     for round_id, members in round_reps.items():
-        roster: list[tuple[str, float]] = []
-        for rep in members:
-            mu = mu_before.get((rep.athlete_id, round_id))
-            if mu is not None:
-                roster.append((str(rep.athlete_id), mu))
+        roster = [(str(aid), mu) for aid, mu in rosters.get(round_id, [])]
         ranks = expected_finish_ranks(roster, scale=scale) if roster else {}
         for rep in members:
             key = (rep.athlete_id, round_id)
@@ -317,7 +328,8 @@ def validate_elo(
 
     reps = _select_representative_rounds(session, report)
     mu_before = _mu_before_lookup(session)
-    completed = _compute_expected(reps, mu_before, report, scale=scale)
+    rosters = _round_rosters(session, mu_before)
+    completed = _compute_expected(reps, mu_before, rosters, report, scale=scale)
     report.rep_rounds = len(completed)
     report.reps = completed
 

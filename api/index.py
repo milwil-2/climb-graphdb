@@ -146,6 +146,27 @@ def season_drivers() -> dict[str, Any]:
     return {"rows": queries.season_drivers()}
 
 
+@app.get("/insights/mc-summary")
+def mc_summary() -> dict[str, Any]:
+    """MC dashboard — headline stats + the result_percentile calibration histogram.
+
+    Zeros / an empty histogram until the Monte-Carlo sync (sync.montecarlo) has
+    stamped distributional props on the representative Performance nodes.
+    """
+    return queries.mc_summary()
+
+
+@app.get("/insights/mc-performances")
+def mc_performances(sort: str = "upsets", limit: int = 50) -> dict[str, Any]:
+    """MC dashboard — top representative Performances by a Monte-Carlo lens.
+
+    ``sort`` is one of ``upsets`` / ``overperformed`` / ``underperformed`` /
+    ``dominant`` / ``volatile`` (unknown ⇒ ``upsets``). Empty until sync.montecarlo
+    has run.
+    """
+    return {"rows": queries.mc_performances(sort=sort, limit=limit)}
+
+
 # ---------------------------------------------------------------------------
 # Static neighborhood viz
 # ---------------------------------------------------------------------------
@@ -157,6 +178,12 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 def index() -> FileResponse:
     """Serve the self-contained neighborhood-viz single page."""
     return FileResponse(_STATIC_DIR / "index.html")
+
+
+@app.get("/mc")
+def mc_dashboard() -> FileResponse:
+    """Serve the self-contained Monte-Carlo outcome-variable dashboard."""
+    return FileResponse(_STATIC_DIR / "mc.html")
 
 
 # Mount the static directory too (so the page could reference assets if added).

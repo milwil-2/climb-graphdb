@@ -150,6 +150,54 @@ _SEASON_DRIVERS_ROWS = [
     }
 ]
 
+_MC_SUMMARY_ROWS = [
+    {
+        "total": 23256,
+        "mean_result_percentile": 0.5012,
+        "mean_surprisal": 2.13,
+        "mean_p_win": 0.041,
+        "mean_rank_std": 3.27,
+    }
+]
+
+#: A deliberately *sparse* histogram (bins 0, 5, 9 only) so the test can confirm
+#: mc_summary fills the missing bins with 0 and always returns all ten.
+_MC_CALIBRATION_ROWS = [
+    {"bin": 0, "count": 1200},
+    {"bin": 5, "count": 2400},
+    {"bin": 9, "count": 800},
+]
+
+_MC_PERF_ROWS = [
+    {
+        "athlete_id": _ATHLETE_ID,
+        "athlete_name": _ATHLETE_NAME,
+        "event_id": "evt:2",
+        "event_name": "World Cup Bern",
+        "start_date": "2024-07-01",
+        "discipline": "B",
+        "round_type": "final",
+        "field_size": 8,
+        "actual_rank": 6,
+        "expected_rank_mc": 2.1,
+        "elo_residual": 3.5,
+        "elo_residual_mc": 3.9,
+        "result_percentile": 0.94,
+        "surprisal": 4.2,
+        "p_win": 0.31,
+        "p_podium": 0.72,
+        "rank_std": 1.4,
+        "pmf_entropy": 1.9,
+    }
+]
+
+#: mc_performances builds its cypher as base + the allowlisted ORDER BY clause +
+#: LIMIT, so the fake driver must be keyed by that exact composed string. We
+#: compose it from the module's own pieces so the test can't drift from the impl.
+_MC_PERF_UPSETS_CYPHER = (
+    queries.MC_PERFORMANCES_BASE + f"ORDER BY {queries._MC_SORTS['upsets']} LIMIT $limit"
+)
+
 _READ_RESULTS: dict[str, list[dict[str, Any]]] = {
     queries.PROFILE_CYPHER: _PROFILE_ROWS,
     queries.NEIGHBORHOOD_CYPHER: _NEIGHBORHOOD_ROWS,
@@ -157,6 +205,9 @@ _READ_RESULTS: dict[str, list[dict[str, Any]]] = {
     queries.VENUE_CLUSTERS_CYPHER: _VENUE_CLUSTER_ROWS,
     queries.JETLAGGED_CYPHER: _JETLAGGED_ROWS,
     queries.SEASON_DRIVERS_CYPHER: _SEASON_DRIVERS_ROWS,
+    queries.MC_SUMMARY_CYPHER: _MC_SUMMARY_ROWS,
+    queries.MC_CALIBRATION_CYPHER: _MC_CALIBRATION_ROWS,
+    _MC_PERF_UPSETS_CYPHER: _MC_PERF_ROWS,
     queries.TIMELINE_EVENTS_CYPHER: _TIMELINE_EVENT_ROWS,
     queries.ATHLETE_EXISTS_CYPHER: _EXISTS_ROWS,
     # TrainingSignal / InjuryEvent: seeded empty ⇒ the L4/P5-era nodes don't
@@ -188,6 +239,9 @@ _ALL_QUERY_CYPHERS = (
     queries.VENUE_CLUSTERS_CYPHER,
     queries.JETLAGGED_CYPHER,
     queries.SEASON_DRIVERS_CYPHER,
+    queries.MC_SUMMARY_CYPHER,
+    queries.MC_CALIBRATION_CYPHER,
+    _MC_PERF_UPSETS_CYPHER,
     queries.TIMELINE_EVENTS_CYPHER,
     queries.TIMELINE_SIGNALS_CYPHER,
     queries.TIMELINE_INJURIES_CYPHER,
@@ -399,6 +453,113 @@ def test_season_drivers_no_data_returns_empty(client: TestClient) -> None:
         assert resp.status_code == 200
         assert resp.json() == {"rows": []}
     finally:
+        db._driver = original
+
+
+# ---------------------------------------------------------------------------
+# MC — Monte-Carlo placement distribution dashboard
+# ---------------------------------------------------------------------------
+
+
+def test_mc_summary_happy_path(client: TestClient) -> None:
+    resp = client.get("/insights/mc-summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 23256
+    assert body["mean_result_percentile"] == pytest.approx(0.5012)
+    assert body["mean_surprisal"] == pytest.approx(2.13)
+    # Always exactly 10 contiguous bins, with the unseeded ones filled to 0.
+    calib = body["calibration"]
+    assert len(calib) == 10
+    assert [c["bin_lo"] for c in calib] == pytest.approx([i / 10 for i in range(10)])
+    by_bin = {round(c["bin_lo"] * 10): c["count"] for c in calib}
+    assert by_bin[0] == 1200 and by_bin[5] == 2400 and by_bin[9] == 800
+    assert by_bin[1] == 0 and by_bin[8] == 0  # missing bins filled
+
+
+def test_mc_summary_no_data_returns_zeros(client: TestClient) -> None:
+    """No MC props yet ⇒ total 0, all-zero histogram, None means — never an error."""
+    original = db._driver
+    db._driver = _empty_driver()
+    try:
+        resp = client.get("/insights/mc-summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 0
+        assert body["mean_result_percentile"] is None
+        assert len(body["calibration"]) == 10
+        assert all(c["count"] == 0 for c in body["calibration"])
+    finally:
+        db._driver = original
+
+
+def test_mc_performances_happy_path(client: TestClient) -> None:
+    resp = client.get("/insights/mc-performances?sort=upsets&limit=50")
+    assert resp.status_code == 200
+    rows = resp.json()["rows"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["athlete_id"] == _ATHLETE_ID
+    assert row["round_type"] == "final"
+    assert row["actual_rank"] == 6
+    assert row["result_percentile"] == pytest.approx(0.94)
+    assert row["surprisal"] == pytest.approx(4.2)
+    # Both outcome variables surface side by side for comparison.
+    assert row["elo_residual"] == pytest.approx(3.5)
+    assert row["elo_residual_mc"] == pytest.approx(3.9)
+
+
+def test_mc_performances_unknown_sort_falls_back_to_default(client: TestClient) -> None:
+    """An out-of-allowlist sort resolves to the default (upsets) clause, not an error."""
+    resp = client.get("/insights/mc-performances?sort=DROP%20TABLE")
+    assert resp.status_code == 200
+    # Served by the seeded default-sort cypher ⇒ rows come back (no injection).
+    assert len(resp.json()["rows"]) == 1
+
+
+def test_mc_performances_no_data_returns_empty(client: TestClient) -> None:
+    original = db._driver
+    db._driver = _empty_driver()
+    try:
+        resp = client.get("/insights/mc-performances")
+        assert resp.status_code == 200
+        assert resp.json() == {"rows": []}
+    finally:
+        db._driver = original
+
+
+def test_mc_sort_clauses_are_static_literals() -> None:
+    """The sort allowlist holds only fixed ``p.<field> ASC|DESC`` clauses.
+
+    The user-supplied ``sort`` selects a key; the *value* (never the raw input)
+    is interpolated, so there is no injection surface. Guard that every clause is
+    a plain property ordering.
+    """
+    for clause in queries._MC_SORTS.values():
+        assert clause.startswith("p.")
+        assert clause.endswith(" ASC") or clause.endswith(" DESC")
+
+
+def test_mc_performances_limit_clamped_to_max() -> None:
+    """An over-large limit is clamped to _MAX_MC before hitting the database."""
+    captured: dict[str, Any] = {}
+
+    original = db._driver
+    db._driver = FakeNeo4jDriver(read_results={_MC_PERF_UPSETS_CYPHER: _MC_PERF_ROWS})
+
+    # Wrap db.run_read to capture the bound limit param.
+    real_run_read = db.run_read
+
+    def _spy(cypher: str, **params: Any) -> list[dict[str, Any]]:
+        captured.update(params)
+        return real_run_read(cypher, **params)
+
+    db.run_read = _spy  # type: ignore[assignment]
+    try:
+        queries.mc_performances(sort="upsets", limit=10_000)
+        assert captured["limit"] == queries._MAX_MC
+    finally:
+        db.run_read = real_run_read  # type: ignore[assignment]
         db._driver = original
 
 

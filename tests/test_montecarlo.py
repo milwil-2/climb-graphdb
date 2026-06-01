@@ -228,3 +228,44 @@ def test_invalid_params_raise() -> None:
         placement_pmf(ROSTER, scale=0.0)
     with pytest.raises(ValueError, match="n_sims must be strictly positive"):
         placement_pmf(ROSTER, n_sims=0)
+
+
+# ---------------------------------------------------------------------------
+# Gumbel-sort domain safety (issue #59)
+# ---------------------------------------------------------------------------
+
+
+class _ZeroFirstRandom:
+    """Stand-in RNG whose first ``random()`` returns the 0.0 endpoint.
+
+    ``random.Random.random()`` ranges over ``[0.0, 1.0)``, so ``0.0`` is a
+    possible draw. Feeding it to the Gumbel transform ``-log(-log(u))`` hits
+    ``math.log(0.0)`` -> ``ValueError`` (#59). This stub forces that draw.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._first = True
+
+    def random(self) -> float:
+        if self._first:
+            self._first = False
+            return 0.0
+        return 0.5
+
+    def gauss(self, mu: float, sigma: float) -> float:  # pragma: no cover - unused here
+        return mu
+
+
+def test_placement_pmf_plackett_luce_survives_zero_uniform(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Gumbel draw must tolerate random()==0.0 instead of raising math domain error.
+    monkeypatch.setattr("climber_network.elo.montecarlo.random.Random", _ZeroFirstRandom)
+    pmf = placement_pmf(
+        [("a", 100.0), ("b", 0.0)],
+        model=PLACKETT_LUCE,
+        sample_sigma=False,
+        n_sims=1,
+    )
+    assert set(pmf) == {"a", "b"}
+    for probs in pmf.values():
+        assert all(math.isfinite(p) for p in probs)
+        assert math.isclose(sum(probs), 1.0)

@@ -45,12 +45,11 @@ required for the downstream sync to stay idempotent.
 
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass, field
 
 from climber_network.elo.expected import DEFAULT_SCALE
-from climber_network.elo.montecarlo import GAUSSIAN, PLACKETT_LUCE
+from climber_network.elo.montecarlo import GAUSSIAN, PLACKETT_LUCE, _gumbel_noise
 
 __all__ = [
     "DEFAULT_SCALE",
@@ -230,8 +229,7 @@ def simulate_event_progression(
         if model == GAUSSIAN:
             return rng.gauss(mus[idx], sigs[idx])
         mu = rng.gauss(mus[idx], jit[idx]) if (any_jitter and jit[idx] > 0.0) else mus[idx]
-        u = rng.random()  # in (0, 1) -> Gumbel(0, 1) = -log(-log(U))
-        return mu / scale - math.log(-math.log(u))
+        return mu / scale + _gumbel_noise(rng)
 
     # reached[i][round_idx] = number of trials athlete i reached that round.
     reached: list[list[int]] = [[0] * n_rounds for _ in range(n)]

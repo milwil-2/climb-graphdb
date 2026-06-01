@@ -12,9 +12,12 @@ from zoneinfo import available_timezones
 import pytest
 
 from climber_network.geo.geocode import (
+    _CITY_OVERRIDES,
     COUNTRY_CAPITAL_TZ,
     GeoNamesIndex,
     GeoPoint,
+    _Override,
+    _validate_overrides,
     alpha2_to_alpha3,
     country_capital_tz,
     extract_city,
@@ -24,7 +27,6 @@ from climber_network.geo.geocode import (
     tz_for,
     utc_offset_hours,
 )
-from climber_network.geo.geocode import _CITY_OVERRIDES, _Override, _validate_overrides
 
 # ---------------------------------------------------------------------------
 # Fixture

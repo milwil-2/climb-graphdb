@@ -26,12 +26,16 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Date, Float, Integer, String, create_engine
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from climber_network import config
+
+if TYPE_CHECKING:
+    from climber_network.source.cohort import CohortScope
 
 
 class Base(DeclarativeBase):
@@ -176,6 +180,18 @@ def read_session(engine: Engine) -> Iterator[Session]:
         session.close()
 
 
-def iter_rows(session: Session, model: type[Base]) -> Iterator[Base]:
-    """Yield every row of *model* in primary-key order (stable, read-only)."""
-    yield from session.query(model).order_by(model.id).all()  # type: ignore[attr-defined]
+def iter_rows(
+    session: Session, model: type[Base], *, scope: CohortScope | None = None
+) -> Iterator[Base]:
+    """Yield rows of *model* in primary-key order (stable, read-only).
+
+    When *scope* is given, the read is constrained to the cohort slice via
+    :func:`climber_network.source.cohort.filter_query` (the single MVP-slice
+    chokepoint); ``scope=None`` reads every row unchanged.
+    """
+    query = session.query(model).order_by(model.id)  # type: ignore[attr-defined]
+    if scope is not None:
+        from climber_network.source import cohort
+
+        query = cohort.filter_query(query, model, scope)
+    yield from query.all()

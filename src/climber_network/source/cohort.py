@@ -74,7 +74,7 @@ def _distinct_athletes_in_seasons(
         session.query(pg.Result.athlete_id)
         .join(pg.Round, pg.Round.id == pg.Result.round_id)
         .join(pg.Event, pg.Event.id == pg.Round.event_id)
-        .filter(pg.Result.dns.is_(False))
+        .filter(pg.Result.dns.isnot(True))
     )
     if exact is not None:
         q = q.filter(pg.Event.season == exact)
@@ -106,7 +106,7 @@ def _select_cohort(
             pg.Athlete.id.in_(sorted(eligible)),
             pg.Event.season >= lo,
             pg.Event.season <= hi,
-            pg.Result.dns.is_(False),
+            pg.Result.dns.isnot(True),
         )
         .group_by(pg.Athlete.id, pg.Athlete.gender)
         .all()

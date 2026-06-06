@@ -8,6 +8,8 @@ models.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from climber_network.elo.advancement import (
@@ -162,3 +164,46 @@ def test_invalid_args_raise() -> None:
         simulate_event_progression(FIELD, THREE_ROUNDS, scale=0.0)
     with pytest.raises(ValueError):
         simulate_event_progression(FIELD, THREE_ROUNDS, model="unknown")
+
+
+# ---------------------------------------------------------------------------
+# Gumbel-sort domain safety (issue #59)
+# ---------------------------------------------------------------------------
+
+
+class _ZeroFirstRandom:
+    """Stand-in RNG whose first ``random()`` returns the 0.0 endpoint.
+
+    ``random.Random.random()`` ranges over ``[0.0, 1.0)``; feeding the ``0.0``
+    draw to the Gumbel transform ``-log(-log(u))`` hits ``math.log(0.0)`` ->
+    ``ValueError`` (#59). This stub forces that draw on the first call.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._first = True
+
+    def random(self) -> float:
+        if self._first:
+            self._first = False
+            return 0.0
+        return 0.5
+
+    def gauss(self, mu: float, sigma: float) -> float:  # pragma: no cover - unused here
+        return mu
+
+
+def test_simulate_event_progression_survives_zero_uniform(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Gumbel draw must tolerate random()==0.0 instead of raising math domain error.
+    monkeypatch.setattr("climber_network.elo.advancement.random.Random", _ZeroFirstRandom)
+    results = simulate_event_progression(
+        [("a", 100.0), ("b", 0.0)],
+        [RoundSpec(round_type="final", advance_count=2)],
+        model=PLACKETT_LUCE,
+        sample_sigma=False,
+        n_sims=1,
+    )
+    assert set(results) == {"a", "b"}
+    for res in results.values():
+        assert math.isfinite(res.p_win)
+        assert math.isfinite(res.p_podium)
+        assert math.isfinite(res.p_make_final)

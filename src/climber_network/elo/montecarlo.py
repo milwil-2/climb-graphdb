@@ -83,6 +83,23 @@ GAUSSIAN: str = "gaussian"
 PLACKETT_LUCE: str = "plackett_luce"
 
 
+def _gumbel_noise(rng: random.Random) -> float:
+    """A standard ``Gumbel(0, 1)`` draw, ``-log(-log(U))`` with ``U`` in ``(0, 1)``.
+
+    ``random.Random.random()`` returns a float in ``[0.0, 1.0)``, so it can yield
+    exactly ``0.0`` — which sends the inner ``math.log(0.0)`` to a domain error and
+    crashes the Gumbel-sort simulation (issue #59). We resample the ``0.0``
+    endpoint (unbiased, and in practice never loops) so the result is always
+    finite. Shared by :func:`placement_pmf` and
+    :func:`climber_network.elo.advancement.simulate_event_progression` so the
+    guard lives in exactly one place.
+    """
+    u = rng.random()
+    while u <= 0.0:
+        u = rng.random()
+    return -math.log(-math.log(u))
+
+
 def placement_pmf(
     roster: list[tuple[str, float]],
     sigmas: dict[str, float] | None = None,
@@ -203,8 +220,7 @@ def placement_pmf(
             gumbels: list[float] = []
             for i in range(n):
                 mu = rng.gauss(mus[i], jit[i]) if (any_jitter and jit[i] > 0.0) else mus[i]
-                u = rng.random()  # in (0, 1) -> Gumbel(0, 1) = -log(-log(U))
-                gumbels.append(mu / scale - math.log(-math.log(u)))
+                gumbels.append(mu / scale + _gumbel_noise(rng))
             order = sorted(indices, key=lambda i: gumbels[i], reverse=True)
             for rank_idx, athlete_idx in enumerate(order):
                 counts[athlete_idx][rank_idx] += 1

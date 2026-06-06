@@ -45,7 +45,8 @@ from typing import Any, Protocol
 import typer
 
 from climber_network import vocab
-from climber_network.source import pg
+from climber_network.source import cohort, pg
+from climber_network.source.cohort import CohortScope
 
 app = typer.Typer(add_completion=False, help="L1 competition mirror: Postgres → Neo4j.")
 
@@ -159,19 +160,25 @@ def _iso(d: date | None) -> str | None:
     return d.isoformat() if d is not None else None
 
 
-def sync_graph(writer: GraphWriter, session: pg.Session) -> SyncReport:
+def sync_graph(
+    writer: GraphWriter, session: pg.Session, *, scope: CohortScope | None = None
+) -> SyncReport:
     """Mirror the L1 competition graph from *session* into *writer*. Idempotent.
+
+    When *scope* is given, only the cohort slice is mirrored (every source read is
+    constrained consistently, so ``src_*`` counts reflect the slice and
+    :func:`validate_counts` still holds); ``scope=None`` mirrors the full store.
 
     Returns a :class:`SyncReport` of source vs. graph counts (with documented
     filters) suitable for :func:`validate_counts`.
     """
     report = SyncReport()
 
-    athletes = list(pg.iter_rows(session, pg.Athlete))
-    events = list(pg.iter_rows(session, pg.Event))
-    rounds = list(pg.iter_rows(session, pg.Round))
-    results = list(pg.iter_rows(session, pg.Result))
-    ratings = list(pg.iter_rows(session, pg.Rating))
+    athletes = list(pg.iter_rows(session, pg.Athlete, scope=scope))
+    events = list(pg.iter_rows(session, pg.Event, scope=scope))
+    rounds = list(pg.iter_rows(session, pg.Round, scope=scope))
+    results = list(pg.iter_rows(session, pg.Result, scope=scope))
+    ratings = list(pg.iter_rows(session, pg.Rating, scope=scope))
 
     # All source rows are now fully materialized in memory. Detach them from the
     # Session (keeping their loaded values) and end the read transaction so the
@@ -459,13 +466,22 @@ def validate_counts(report: SyncReport) -> None:
 # ---------------------------------------------------------------------------
 
 
+_DB_OPT = typer.Option(
+    None,
+    "--database-url",
+    help="Override the source connection URL (default: config.DATABASE_URL).",
+)
+_COHORT_OPT = typer.Option(
+    None,
+    "--cohort/--no-cohort",
+    help="Restrict to the MVP cohort slice (default: the COHORT_ENABLED env var).",
+)
+
+
 @app.command()
 def run(
-    database_url: str | None = typer.Option(
-        None,
-        "--database-url",
-        help="Override the source connection URL (default: config.DATABASE_URL).",
-    ),
+    database_url: str | None = _DB_OPT,
+    cohort_flag: bool | None = _COHORT_OPT,
 ) -> None:
     """Run the L1 competition mirror against the configured source database."""
     from rich.console import Console
@@ -476,7 +492,8 @@ def run(
     engine = pg.make_engine(database_url)
     writer = get_client()
     with pg.read_session(engine) as session:
-        report = sync_graph(writer, session)
+        scope = cohort.scope_from_config(session, override=cohort_flag)
+        report = sync_graph(writer, session, scope=scope)
     report.log(console)
     validate_counts(report)
     console.print("[green]Count validation passed.[/green]")

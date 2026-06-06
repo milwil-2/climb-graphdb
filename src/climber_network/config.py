@@ -72,6 +72,16 @@ def CORS_ALLOW_ORIGINS() -> str:
     return os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost:3000")
 
 
+def COHORT_ENABLED() -> bool:
+    """Whether the MVP cohort slice is enabled by default (``COHORT_ENABLED`` env).
+
+    Truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive). Anything
+    else — including unset — is ``False``, so the full unfiltered pipeline is the
+    default. A ``--cohort/--no-cohort`` CLI flag overrides this per run.
+    """
+    return os.environ.get("COHORT_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Travel / fatigue model constants
 # ---------------------------------------------------------------------------
@@ -178,3 +188,52 @@ class MonteCarloParams:
 
 #: Module-level singleton — import and use directly.
 MC_PARAMS: MonteCarloParams = MonteCarloParams()
+
+
+# ---------------------------------------------------------------------------
+# MVP cohort-slice constants (small, coherent source subset — default OFF)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CohortParams:
+    """Immutable constants selecting the MVP cohort slice of the source data.
+
+    The cohort is the ``n_per_gender`` most-active men + women who competed both
+    in the *current* season **and** in at least one earlier season; the slice then
+    keeps the FULL field of every event those athletes entered within a recent
+    ``season_window``. See :mod:`climber_network.source.cohort`.
+
+    Attributes:
+        n_per_gender:   Number of athletes to keep per gender (50 + 50 = ~100).
+        season_window:  Width of the recent-season window in seasons; the window
+                        is ``[current_season - (season_window - 1), current_season]``.
+        current_season: The "this season" anchor. ``None`` ⇒ auto-detect as the
+                        maximum ``events.season`` present in the source store.
+    """
+
+    n_per_gender: int = 50
+    season_window: int = 4
+    current_season: int | None = None
+
+
+def cohort_params_from_env() -> CohortParams:
+    """Build :class:`CohortParams` from the environment (all optional).
+
+    Reads ``COHORT_SIZE_PER_GENDER``, ``COHORT_SEASON_WINDOW`` and
+    ``COHORT_CURRENT_SEASON``; each falls back to the :class:`CohortParams`
+    default when unset/blank. Whether the slice is *applied* is governed
+    separately by :func:`COHORT_ENABLED` / the ``--cohort`` CLI flag.
+    """
+
+    def _int(name: str) -> int | None:
+        raw = os.environ.get(name, "").strip()
+        return int(raw) if raw else None
+
+    size = _int("COHORT_SIZE_PER_GENDER")
+    window = _int("COHORT_SEASON_WINDOW")
+    return CohortParams(
+        n_per_gender=size if size is not None else 50,
+        season_window=window if window is not None else 4,
+        current_season=_int("COHORT_CURRENT_SEASON"),
+    )

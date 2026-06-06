@@ -24,15 +24,21 @@ but must NEVER import ``climbing_elo`` or ``knowledge_graph``.
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from collections.abc import MutableMapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from climber_network.source import pg
+
+if TYPE_CHECKING:
+    from climber_network.source.cohort import CohortScope
 
 __all__ = [
     "ROUND_DEPTH",
     "RepRound",
     "select_representative_rounds",
+    "round_rosters",
     "mu_before_lookup",
     "sigma_before_lookup",
 ]
@@ -111,6 +117,7 @@ def select_representative_rounds(
     *,
     src_rounds_out: list[int] | None = None,
     src_results_out: list[int] | None = None,
+    scope: CohortScope | None = None,
 ) -> list[RepRound]:
     """Pick the representative round per (athlete, event) from the source data.
 
@@ -143,9 +150,9 @@ def select_representative_rounds(
         ``elo_residual`` are both :data:`math.nan` — the caller is responsible
         for filling these in.
     """
-    rounds = list(pg.iter_rows(session, pg.Round))
-    results = list(pg.iter_rows(session, pg.Result))
-    events = list(pg.iter_rows(session, pg.Event))
+    rounds = list(pg.iter_rows(session, pg.Round, scope=scope))
+    results = list(pg.iter_rows(session, pg.Result, scope=scope))
+    events = list(pg.iter_rows(session, pg.Event, scope=scope))
 
     if src_rounds_out is not None:
         src_rounds_out[0] = len(rounds)
@@ -201,11 +208,65 @@ def select_representative_rounds(
 
 
 # ---------------------------------------------------------------------------
+# Full per-round field (the simulation / expected-rank roster).
+# ---------------------------------------------------------------------------
+
+
+def round_rosters(
+    session: pg.Session,
+    mu_before: dict[tuple[int, int], float],
+    *,
+    scope: CohortScope | None = None,
+) -> dict[int, list[tuple[int, float]]]:
+    """Map ``round_id`` → the full field of ``(athlete_id, mu_before)`` for that round.
+
+    The roster is **every** athlete who recorded a finishing rank (not a DNS) in
+    that round and has a point-in-time ``mu_before`` — independent of which round
+    is each athlete's *representative* (deepest) round. This is the field an
+    athlete's ``actual_rank`` is measured against, so the closed-form
+    ``expected_rank`` and the Monte-Carlo PMF must both be computed over it.
+
+    This is deliberately distinct from grouping :class:`RepRound` objects by
+    ``round_id``: a rep is assigned to its *deepest* round only, so grouping reps
+    would drop every athlete who advanced from a qualification/semifinal round,
+    truncating the shallower round's field to just the eliminated athletes (#63).
+
+    Duplicate ``(athlete, round)`` result rows resolve to the last in primary-key
+    order (stable, because :func:`iter_rows` yields in pk order), matching
+    :func:`mu_before_lookup`.
+
+    Parameters
+    ----------
+    session:
+        A read-only SQLAlchemy session bound to the source (climbing-elo) database.
+    mu_before:
+        The ``(athlete_id, round_id) → mu_before`` map from :func:`mu_before_lookup`.
+
+    Returns
+    -------
+    dict[int, list[tuple[int, float]]]
+        Per round, the list of ``(athlete_id, mu_before)`` making up the full field.
+    """
+    by_athlete: dict[int, dict[int, float]] = defaultdict(dict)
+    for res in pg.iter_rows(session, pg.Result, scope=scope):
+        assert isinstance(res, pg.Result)
+        if res.dns or res.rank is None:
+            continue
+        mu = mu_before.get((res.athlete_id, res.round_id))
+        if mu is None:
+            continue
+        by_athlete[res.round_id][res.athlete_id] = mu
+    return {round_id: list(athletes.items()) for round_id, athletes in by_athlete.items()}
+
+
+# ---------------------------------------------------------------------------
 # Rating-history lookups.
 # ---------------------------------------------------------------------------
 
 
-def mu_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
+def mu_before_lookup(
+    session: pg.Session, *, scope: CohortScope | None = None
+) -> dict[tuple[int, int], float]:
     """Map ``(athlete_id, round_id)`` → pre-event ``mu_before`` from rating_history.
 
     Point-in-time μ as of that round, read READ-ONLY from the source store. If a
@@ -224,13 +285,15 @@ def mu_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
         Mapping from ``(athlete_id, round_id)`` to the ``mu_before`` value.
     """
     out: dict[tuple[int, int], float] = {}
-    for h in pg.iter_rows(session, pg.RatingHistory):
+    for h in pg.iter_rows(session, pg.RatingHistory, scope=scope):
         assert isinstance(h, pg.RatingHistory)
         out[(h.athlete_id, h.round_id)] = h.mu_before
     return out
 
 
-def sigma_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
+def sigma_before_lookup(
+    session: pg.Session, *, scope: CohortScope | None = None
+) -> dict[tuple[int, int], float]:
     """Map ``(athlete_id, round_id)`` → pre-event ``sigma_before`` from rating_history.
 
     Point-in-time σ as of that round, read READ-ONLY from the source store. If a
@@ -249,7 +312,7 @@ def sigma_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
         Mapping from ``(athlete_id, round_id)`` to the ``sigma_before`` value.
     """
     out: dict[tuple[int, int], float] = {}
-    for h in pg.iter_rows(session, pg.RatingHistory):
+    for h in pg.iter_rows(session, pg.RatingHistory, scope=scope):
         assert isinstance(h, pg.RatingHistory)
         out[(h.athlete_id, h.round_id)] = h.sigma_before
     return out

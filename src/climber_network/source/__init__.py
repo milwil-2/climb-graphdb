@@ -7,6 +7,6 @@ itself (isolation constraint) and never emits writes or DDL.
 
 from __future__ import annotations
 
-from climber_network.source import pg
+from climber_network.source import cohort, pg
 
-__all__ = ["pg"]
+__all__ = ["cohort", "pg"]

@@ -62,3 +62,42 @@ def test_graph_stats_fixture_shape() -> None:
     assert set(payload) == {"nodes", "relationships"}
     assert isinstance(payload["nodes"], int)
     assert isinstance(payload["relationships"], int)
+
+
+# ---------------------------------------------------------------------------
+# Developer-only MC dashboard gate (hidden in Vercel production).
+# ---------------------------------------------------------------------------
+
+_MC_ROUTES = ("/mc", "/insights/mc-summary", "/insights/mc-performances")
+
+
+@pytest.mark.parametrize("route", _MC_ROUTES)
+def test_mc_routes_404_in_vercel_production(
+    client: TestClient, route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Vercel production the MC dashboard surfaces are hidden (404, not 403)."""
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    resp = client.get(route)
+    assert resp.status_code == 404
+
+
+def test_mc_dashboard_served_off_production(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Locally / on preview (VERCEL_ENV not 'production') the dashboard is served."""
+    monkeypatch.delenv("VERCEL_ENV", raising=False)
+    resp = client.get("/mc")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.parametrize("vercel_env", ["production", "preview", "development"])
+def test_mc_dashboard_not_a_public_static_asset(
+    client: TestClient, vercel_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dashboard page lives outside the public ``/static`` mount in every env.
+
+    It must never be fetchable as a raw static file (which would bypass the gate).
+    """
+    monkeypatch.setenv("VERCEL_ENV", vercel_env)
+    assert client.get("/static/mc.html").status_code == 404

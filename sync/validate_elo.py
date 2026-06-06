@@ -54,11 +54,13 @@ from climber_network import vocab
 from climber_network.elo.expected import DEFAULT_SCALE, expected_finish_ranks
 from climber_network.elo.reps import RepRound
 from climber_network.elo.reps import mu_before_lookup as _mu_before_lookup_impl
+from climber_network.elo.reps import round_rosters as _round_rosters_impl
 from climber_network.elo.reps import (
     select_representative_rounds as _select_representative_rounds_impl,
 )
 from climber_network.elo.rested import REST_QUERY  # re-exported for callers/tests
-from climber_network.source import pg
+from climber_network.source import cohort, pg
+from climber_network.source.cohort import CohortScope
 from climber_network.stats import pearson  # re-exported for callers/tests of this module
 
 # ``REST_QUERY`` (the RestednessState read query) and ``pearson`` are re-exported
@@ -156,6 +158,8 @@ class ValidateReport:
 def _select_representative_rounds(
     session: pg.Session,
     report: ValidateReport,
+    *,
+    scope: CohortScope | None = None,
 ) -> list[RepRound]:
     """Pick the representative round per (athlete, event) from the source data.
 
@@ -169,46 +173,61 @@ def _select_representative_rounds(
         report.skipped,
         src_rounds_out=rounds_out,
         src_results_out=results_out,
+        scope=scope,
     )
     report.src_rounds = rounds_out[0]
     report.src_results = results_out[0]
     return reps
 
 
-def _mu_before_lookup(session: pg.Session) -> dict[tuple[int, int], float]:
+def _mu_before_lookup(
+    session: pg.Session, *, scope: CohortScope | None = None
+) -> dict[tuple[int, int], float]:
     """Map (athlete_id, round_id) → pre-event ``mu_before`` from rating_history.
 
     Thin wrapper around :func:`climber_network.elo.reps.mu_before_lookup`.
     """
-    return _mu_before_lookup_impl(session)
+    return _mu_before_lookup_impl(session, scope=scope)
+
+
+def _round_rosters(
+    session: pg.Session,
+    mu_before: dict[tuple[int, int], float],
+    *,
+    scope: CohortScope | None = None,
+) -> dict[int, list[tuple[int, float]]]:
+    """Map round_id → the full ``(athlete_id, mu_before)`` field for that round.
+
+    Thin wrapper around :func:`climber_network.elo.reps.round_rosters`.
+    """
+    return _round_rosters_impl(session, mu_before, scope=scope)
 
 
 def _compute_expected(
     reps: list[RepRound],
     mu_before: dict[tuple[int, int], float],
+    rosters: dict[int, list[tuple[int, float]]],
     report: ValidateReport,
     *,
     scale: float = DEFAULT_SCALE,
 ) -> list[RepRound]:
     """Fill ``expected_rank`` / ``elo_residual`` on each representative round.
 
-    The roster for a representative round is every athlete in that *same round*
-    who also has a ``mu_before`` (so the expected-rank field matches the actual
-    field). Reps whose own ``mu_before`` is missing are dropped (reported).
+    The roster for a round is the **full field** — every athlete with a finishing
+    rank + ``mu_before`` in that round (:func:`~climber_network.elo.reps.round_rosters`),
+    not just the reps whose representative round it is. That keeps the expected-rank
+    field matching the actual field even when most of the round advanced to a deeper
+    one (#63). Reps whose own ``mu_before`` is missing are dropped (reported).
     """
     # Group the chosen reps by their round. A round may host reps for several
-    # athletes; the roster (athletes-with-mu in that round) is shared across them.
+    # athletes; the (full-field) roster for that round is shared across them.
     round_reps: dict[int, list[RepRound]] = defaultdict(list)
     for rep in reps:
         round_reps[rep.round_id].append(rep)
 
     completed: list[RepRound] = []
     for round_id, members in round_reps.items():
-        roster: list[tuple[str, float]] = []
-        for rep in members:
-            mu = mu_before.get((rep.athlete_id, round_id))
-            if mu is not None:
-                roster.append((str(rep.athlete_id), mu))
+        roster = [(str(aid), mu) for aid, mu in rosters.get(round_id, [])]
         ranks = expected_finish_ranks(roster, scale=scale) if roster else {}
         for rep in members:
             key = (rep.athlete_id, round_id)
@@ -304,6 +323,7 @@ def validate_elo(
     session: pg.Session,
     *,
     scale: float = DEFAULT_SCALE,
+    scope: CohortScope | None = None,
 ) -> ValidateReport:
     """Precompute expected_rank / elo_residual + the correlation report. Idempotent.
 
@@ -315,9 +335,10 @@ def validate_elo(
     """
     report = ValidateReport()
 
-    reps = _select_representative_rounds(session, report)
-    mu_before = _mu_before_lookup(session)
-    completed = _compute_expected(reps, mu_before, report, scale=scale)
+    reps = _select_representative_rounds(session, report, scope=scope)
+    mu_before = _mu_before_lookup(session, scope=scope)
+    rosters = _round_rosters(session, mu_before, scope=scope)
+    completed = _compute_expected(reps, mu_before, rosters, report, scale=scale)
     report.rep_rounds = len(completed)
     report.reps = completed
 
@@ -340,12 +361,18 @@ _DB_OPT = typer.Option(
     "--database-url",
     help="Override the source connection URL (default: config.DATABASE_URL).",
 )
+_COHORT_OPT = typer.Option(
+    None,
+    "--cohort/--no-cohort",
+    help="Restrict to the MVP cohort slice (default: the COHORT_ENABLED env var).",
+)
 
 
 @app.command()
 def run(
     out: Path | None = _OUT_OPT,
     database_url: str | None = _DB_OPT,
+    cohort_flag: bool | None = _COHORT_OPT,
 ) -> None:
     """Run the P3d validation against the configured source DB + Neo4j."""
     from rich.console import Console
@@ -356,7 +383,8 @@ def run(
     engine = pg.make_engine(database_url)
     client = get_client()
     with pg.read_session(engine) as session:
-        report = validate_elo(client, session)
+        scope = cohort.scope_from_config(session, override=cohort_flag)
+        report = validate_elo(client, session, scope=scope)
     report.log(console)
 
     if out is not None:

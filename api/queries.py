@@ -49,6 +49,7 @@ _MAX_EVENTS = 50
 _MAX_RIVALS = 50
 _MAX_CLUSTERS = 25
 _MAX_UNDERPERFORMERS = 50
+_MAX_MC = 100
 _DEFAULT_HOPS = 2
 _MAX_HOPS = 3
 
@@ -391,6 +392,131 @@ def season_drivers() -> list[dict[str, Any]]:
             "season_consistency": r.get("season_consistency"),
             "n_events": r.get("n_events"),
             "n_upsets": r.get("n_upsets"),
+        }
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# MC — Monte-Carlo placement distribution (the second outcome variable).
+# Surfaces the per-Performance distributional props stamped by sync.montecarlo
+# (result_percentile / surprisal / p_win / p_podium / rank_std / pmf_entropy /
+# expected_rank_mc), alongside the closed-form elo_residual for comparison.
+# ---------------------------------------------------------------------------
+
+#: Aggregate stats over every Performance carrying a Monte-Carlo result.
+MC_SUMMARY_CYPHER = (
+    f"MATCH (p:{_PERFORMANCE}) WHERE p.result_percentile IS NOT NULL "
+    "RETURN count(*) AS total, "
+    "avg(p.result_percentile) AS mean_result_percentile, "
+    "avg(p.surprisal) AS mean_surprisal, "
+    "avg(p.p_win) AS mean_p_win, "
+    "avg(p.rank_std) AS mean_rank_std"
+)
+
+#: result_percentile histogram in 10 equal-width bins. A well-calibrated model
+#: makes this ~uniform (the discrete-PMF PIT check): each decile of finishing
+#: position should be about equally likely, so a flat profile ≈ calibrated.
+MC_CALIBRATION_CYPHER = (
+    f"MATCH (p:{_PERFORMANCE}) WHERE p.result_percentile IS NOT NULL "
+    "WITH CASE WHEN p.result_percentile >= 1.0 THEN 9 "
+    "ELSE toInteger(floor(p.result_percentile * 10)) END AS bin "
+    "RETURN bin, count(*) AS count ORDER BY bin"
+)
+
+
+def mc_summary() -> dict[str, Any]:
+    """Return MC headline stats + the result_percentile calibration histogram.
+
+    Shape::
+
+        {"total": int, "mean_result_percentile": float|None,
+         "mean_surprisal": ..., "mean_p_win": ..., "mean_rank_std": ...,
+         "calibration": [{"bin_lo", "bin_hi", "count"} × 10]}
+
+    Gracefully returns zeros / an all-empty histogram when the Monte-Carlo sync
+    (sync.montecarlo) has not populated any ``result_percentile`` props yet.
+    """
+    stats_rows = db.run_read(MC_SUMMARY_CYPHER)
+    row = stats_rows[0] if stats_rows else {}
+
+    counts = {int(r["bin"]): int(r["count"]) for r in db.run_read(MC_CALIBRATION_CYPHER)}
+    calibration = [
+        {"bin_lo": b / 10, "bin_hi": (b + 1) / 10, "count": counts.get(b, 0)} for b in range(10)
+    ]
+
+    return {
+        "total": int(row.get("total") or 0),
+        "mean_result_percentile": row.get("mean_result_percentile"),
+        "mean_surprisal": row.get("mean_surprisal"),
+        "mean_p_win": row.get("mean_p_win"),
+        "mean_rank_std": row.get("mean_rank_std"),
+        "calibration": calibration,
+    }
+
+
+#: Allowlisted sort modes → fixed ORDER BY clauses (static literals only — the
+#: caller-supplied ``sort`` selects a key, it is NEVER interpolated, so there is
+#: no injection surface). Each names a distinct lens on the MC distribution.
+_MC_SORTS: dict[str, str] = {
+    "upsets": "p.surprisal DESC",  # least likely results (biggest surprises)
+    "overperformed": "p.result_percentile ASC",  # finished better than the field predicted
+    "underperformed": "p.result_percentile DESC",  # finished worse than predicted
+    "dominant": "p.p_win DESC",  # most-favoured to win
+    "volatile": "p.rank_std DESC",  # widest placement distribution
+}
+_MC_DEFAULT_SORT = "upsets"
+
+#: The shared projection for an MC Performance row; the ORDER BY (from the
+#: allowlist above) and LIMIT are appended per call.
+MC_PERFORMANCES_BASE = (
+    f"MATCH (a:{_ATHLETE})-[:{_COMPETED_IN}]->(p:{_PERFORMANCE})"
+    f"-[:{_OF_ROUND}]->(rd:{_ROUND})-[:{_OF_EVENT}]->(e:{_EVENT}) "
+    "WHERE p.result_percentile IS NOT NULL "
+    "RETURN a.id AS athlete_id, a.name AS athlete_name, "
+    "e.id AS event_id, e.name AS event_name, toString(e.start_date) AS start_date, "
+    "e.discipline AS discipline, rd.round_type AS round_type, "
+    "rd.athlete_count AS field_size, p.rank AS actual_rank, "
+    "p.expected_rank_mc AS expected_rank_mc, p.elo_residual AS elo_residual, "
+    "p.elo_residual_mc AS elo_residual_mc, p.result_percentile AS result_percentile, "
+    "p.surprisal AS surprisal, p.p_win AS p_win, p.p_podium AS p_podium, "
+    "p.rank_std AS rank_std, p.pmf_entropy AS pmf_entropy "
+)
+
+
+def mc_performances(
+    sort: str = _MC_DEFAULT_SORT, limit: int = _MAX_UNDERPERFORMERS
+) -> list[dict[str, Any]]:
+    """Return the top representative Performances by an MC lens.
+
+    *sort* picks one of :data:`_MC_SORTS` (unknown values fall back to the
+    default ``"upsets"``). *limit* is clamped to ``[1, _MAX_MC]``. Gracefully
+    returns ``[]`` until ``sync.montecarlo`` has stamped any ``result_percentile``.
+    """
+    clause = _MC_SORTS.get(sort, _MC_SORTS[_MC_DEFAULT_SORT])
+    clamped = max(1, min(int(limit), _MAX_MC))
+    cypher = MC_PERFORMANCES_BASE + f"ORDER BY {clause} LIMIT $limit"
+    rows = db.run_read(cypher, limit=clamped)
+    return [
+        {
+            "athlete_id": str(r["athlete_id"]),
+            "athlete_name": r.get("athlete_name"),
+            "event_id": str(r["event_id"]),
+            "event_name": r.get("event_name"),
+            "start_date": r.get("start_date"),
+            "discipline": r.get("discipline"),
+            "round_type": r.get("round_type"),
+            "field_size": r.get("field_size"),
+            "actual_rank": r.get("actual_rank"),
+            "expected_rank_mc": r.get("expected_rank_mc"),
+            "elo_residual": r.get("elo_residual"),
+            "elo_residual_mc": r.get("elo_residual_mc"),
+            "result_percentile": r.get("result_percentile"),
+            "surprisal": r.get("surprisal"),
+            "p_win": r.get("p_win"),
+            "p_podium": r.get("p_podium"),
+            "rank_std": r.get("rank_std"),
+            "pmf_entropy": r.get("pmf_entropy"),
         }
         for r in rows
     ]

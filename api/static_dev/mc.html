@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Climber Network — Monte-Carlo Outcomes</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --panel: #161b22;
+      --line: #2a313c;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #f78166;
+      --good: #3fb950;
+      --bad: #f85149;
+      --bar: #58a6ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    header { padding: 20px 24px; border-bottom: 1px solid var(--line); }
+    h1 { margin: 0; font-size: 18px; }
+    header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    header a { color: var(--bar); text-decoration: none; }
+    main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+    @media (max-width: 900px) { .cards { grid-template-columns: 1fr 1fr; } }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .card h2 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .stat { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stat small { font-size: 12px; color: var(--muted); font-weight: 400; }
+    .calib { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    .calib h2 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .calib p.note { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
+    .bars { display: flex; align-items: flex-end; gap: 6px; height: 140px; }
+    .bin { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; justify-content: flex-end; }
+    .bin .bar { width: 100%; background: var(--bar); border-radius: 3px 3px 0 0; min-height: 2px; transition: height 0.2s; }
+    .bin .blabel { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .bin .bcount { font-size: 10px; color: var(--text); font-variant-numeric: tabular-nums; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .controls button {
+      padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px;
+      background: var(--panel); color: var(--text); cursor: pointer; font-size: 13px;
+    }
+    .controls button.active { background: var(--accent); color: #0e1116; border-color: var(--accent); font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; cursor: default; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tbody tr:hover { background: #1c2230; }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-variant-numeric: tabular-nums; }
+    .pill.over { background: rgba(63,185,80,0.15); color: var(--good); }
+    .pill.under { background: rgba(248,81,73,0.15); color: var(--bad); }
+    .muted { color: var(--muted); font-size: 12px; }
+    .error { color: var(--accent); }
+    .table-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 8px 4px; overflow-x: auto; }
+    .legend { margin: 10px 2px 0; font-size: 11px; color: var(--muted); }
+    .why { white-space: normal; max-width: 320px; color: var(--muted); font-size: 12px; }
+    .why .pred { color: var(--text); display: block; }
+    .why .reason { display: block; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Climber Network — Monte-Carlo Outcomes</h1>
+    <p>
+      The second outcome variable: a per-placement distribution from
+      <code>sync.montecarlo</code>. &nbsp;·&nbsp; <a href="/">← Neighborhood Explorer</a>
+    </p>
+  </header>
+  <main>
+    <div id="status" class="muted">Loading…</div>
+
+    <div id="summary" style="display:none">
+      <div class="cards">
+        <div class="card"><h2>MC performances</h2><div class="stat" id="s-total">—</div></div>
+        <div class="card"><h2>Mean result percentile</h2><div class="stat" id="s-pctl">—</div></div>
+        <div class="card"><h2>Mean surprisal</h2><div class="stat" id="s-surp">—</div></div>
+        <div class="card"><h2>Mean P(win)</h2><div class="stat" id="s-pwin">—</div></div>
+      </div>
+
+      <div class="calib">
+        <h2>Calibration — result_percentile histogram (PIT)</h2>
+        <p class="note">
+          Each bar is a decile of <code>P(finish ≤ actual)</code>. A well-calibrated model is
+          roughly <strong>flat</strong> (uniform): every finishing decile equally likely.
+        </p>
+        <div class="bars" id="bars"></div>
+      </div>
+    </div>
+
+    <div id="board" style="display:none">
+      <div class="controls" id="controls">
+        <button data-sort="upsets" class="active">Biggest upsets</button>
+        <button data-sort="overperformed">Overperformers</button>
+        <button data-sort="underperformed">Underperformers</button>
+        <button data-sort="dominant">Most dominant</button>
+        <button data-sort="volatile">Most volatile</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Athlete</th><th>Event</th><th>Round</th>
+              <th>Rank</th><th>Pctl</th><th>Surprisal</th>
+              <th>P(win)</th><th>P(podium)</th><th>Rank σ</th>
+              <th>Resid</th><th>Resid (MC)</th><th>Why</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="legend">
+        <strong>Pctl</strong> = P(finish ≤ actual): low ⇒ overperformed (green), high ⇒ underperformed (red).
+        <strong>Surprisal</strong> = −log P(rank); higher ⇒ more unlikely.
+        <strong>Resid</strong> = closed-form elo_residual (actual − expected); <strong>Resid (MC)</strong> = its Monte-Carlo analogue.
+        <strong>P(podium)</strong> = modeled chance of a top-3 finish.
+        <strong>Rank &sigma;</strong> = std-dev of the simulated finishing rank (spread / volatility).
+        <strong>Why</strong> = predicted placing (<code>expected &asymp; N</code> from the MC mean rank, with <code>of M</code> when the field size is known) plus a one-line, lens-specific reason for the current sort.
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    let activeSort = "upsets";
+
+    function fmt(v, digits = 2) {
+      if (v === null || v === undefined) return "—";
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(digits) : "—";
+    }
+
+    async function loadSummary() {
+      const resp = await fetch("/insights/mc-summary");
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const s = await resp.json();
+      if (!s.total) {
+        statusEl.textContent =
+          "No Monte-Carlo data yet — run `uv run --env-file .env python sync/montecarlo.py` to populate.";
+        statusEl.className = "error";
+        return false;
+      }
+      document.getElementById("s-total").textContent = s.total.toLocaleString();
+      document.getElementById("s-pctl").innerHTML =
+        fmt(s.mean_result_percentile, 3) + " <small>/ 0.50 ideal</small>";
+      document.getElementById("s-surp").textContent = fmt(s.mean_surprisal, 2);
+      document.getElementById("s-pwin").textContent = fmt(s.mean_p_win, 3);
+      drawCalibration(s.calibration || []);
+      document.getElementById("summary").style.display = "block";
+      return true;
+    }
+
+    function drawCalibration(bins) {
+      const wrap = document.getElementById("bars");
+      wrap.replaceChildren();
+      const max = Math.max(1, ...bins.map((b) => b.count));
+      bins.forEach((b) => {
+        const col = document.createElement("div");
+        col.className = "bin";
+        const count = document.createElement("div");
+        count.className = "bcount";
+        count.textContent = b.count.toLocaleString();
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.height = (4 + 96 * (b.count / max)) + "%";
+        const label = document.createElement("div");
+        label.className = "blabel";
+        label.textContent = b.bin_lo.toFixed(1);
+        col.appendChild(count);
+        col.appendChild(bar);
+        col.appendChild(label);
+        wrap.appendChild(col);
+      });
+    }
+
+    async function loadBoard(sort) {
+      activeSort = sort;
+      document.querySelectorAll("#controls button").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.sort === sort);
+      });
+      const resp = await fetch("/insights/mc-performances?sort=" + encodeURIComponent(sort) + "&limit=50");
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const data = await resp.json();
+      drawRows(data.rows || [], sort);
+      document.getElementById("board").style.display = "block";
+    }
+
+    function cell(text, cls) {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      td.textContent = text;
+      return td;
+    }
+
+    function predictedPlacing(r) {
+      const exp = Number(r.expected_rank_mc);
+      if (!Number.isFinite(exp)) return "expected placing —";
+      const field = r.field_size ? " of " + r.field_size : "";
+      return "expected ≈ " + Math.round(exp) + field;
+    }
+
+    function reasonFor(r, sort) {
+      const pctl = Number(r.result_percentile);
+      switch (sort) {
+        case "upsets":
+          return "Unlikely finish (surprisal " + fmt(r.surprisal, 2) + "): "
+            + (pctl <= 0.5 ? "beat" : "fell short of") + " the predicted placing.";
+        case "overperformed":
+          return "Finished better than predicted — only " + fmt(pctl * 100, 0)
+            + "% of simulated outcomes were this good or better.";
+        case "underperformed":
+          return "Finished worse than predicted — only " + fmt((1 - pctl) * 100, 0)
+            + "% of simulated outcomes were this bad or worse.";
+        case "dominant":
+          return "Heavy favourite: P(win) " + fmt(r.p_win, 3)
+            + ", P(podium) " + fmt(r.p_podium, 3) + ".";
+        case "volatile":
+          return "Wide placement spread (rank σ " + fmt(r.rank_std, 2)
+            + ", entropy " + fmt(r.pmf_entropy, 2) + ") — outcome was hard to predict.";
+        default:
+          return "";
+      }
+    }
+
+    function drawRows(rows, sort) {
+      const tbody = document.getElementById("rows");
+      tbody.replaceChildren();
+      rows.forEach((r) => {
+        const tr = document.createElement("tr");
+        // Athlete + Event use textContent only (graph-derived → XSS-safe).
+        tr.appendChild(cell(r.athlete_name || r.athlete_id));
+        const ev = cell("");
+        ev.textContent = (r.event_name || r.event_id) + (r.discipline ? " · " + r.discipline : "");
+        tr.appendChild(ev);
+        tr.appendChild(cell(r.round_type || "—"));
+        tr.appendChild(cell(
+          (r.actual_rank ?? "—") + (r.field_size ? " / " + r.field_size : ""), "num"));
+
+        // result_percentile pill, coloured by over/under-performance.
+        const pctlTd = document.createElement("td");
+        pctlTd.className = "num";
+        const pill = document.createElement("span");
+        const p = Number(r.result_percentile);
+        pill.className = "pill " + (p <= 0.5 ? "over" : "under");
+        pill.textContent = fmt(r.result_percentile, 3);
+        pctlTd.appendChild(pill);
+        tr.appendChild(pctlTd);
+
+        tr.appendChild(cell(fmt(r.surprisal, 2), "num"));
+        tr.appendChild(cell(fmt(r.p_win, 3), "num"));
+        tr.appendChild(cell(fmt(r.p_podium, 3), "num"));
+        tr.appendChild(cell(fmt(r.rank_std, 2), "num"));
+        tr.appendChild(cell(fmt(r.elo_residual, 1), "num"));
+        tr.appendChild(cell(fmt(r.elo_residual_mc, 1), "num"));
+        const whyTd = document.createElement("td");
+        whyTd.className = "why";
+        const pred = document.createElement("span");
+        pred.className = "pred";
+        pred.textContent = predictedPlacing(r);
+        const reason = document.createElement("span");
+        reason.className = "reason";
+        reason.textContent = reasonFor(r, sort);
+        whyTd.appendChild(pred);
+        whyTd.appendChild(reason);
+        tr.appendChild(whyTd);
+        tbody.appendChild(tr);
+      });
+      if (!rows.length) {
+        const tr = document.createElement("tr");
+        const td = cell("No rows.");
+        td.colSpan = 12;
+        td.className = "muted";
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+      }
+    }
+
+    document.getElementById("controls").addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      loadBoard(btn.dataset.sort).catch((err) => {
+        statusEl.textContent = "Request failed: " + err.message;
+        statusEl.className = "error";
+      });
+    });
+
+    (async () => {
+      try {
+        const hasData = await loadSummary();
+        if (hasData) {
+          await loadBoard(activeSort);
+          statusEl.textContent = "";
+        }
+      } catch (err) {
+        statusEl.textContent = "Request failed: " + err.message;
+        statusEl.className = "error";
+      }
+    })();
+  </script>
+</body>
+</html>

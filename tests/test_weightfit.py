@@ -282,3 +282,120 @@ def test_objective_prefers_most_negative_over_larger_magnitude_positive() -> Non
     assert result["best"]["pearson"] < 0.0  # we selected a negative correlation
     # A larger-magnitude POSITIVE correlation existed but was (correctly) not chosen.
     assert max(pearsons) > abs(result["best"]["pearson"])
+
+
+class TestFitWeightsGridStepsGuard:
+    def test_grid_steps_one_raises(self) -> None:
+        with pytest.raises(ValueError, match="grid_steps"):
+            fit_weights([], grid_steps=1)
+
+    def test_grid_steps_zero_raises(self) -> None:
+        with pytest.raises(ValueError, match="grid_steps"):
+            fit_weights([], grid_steps=0)
+
+    def test_grid_steps_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="grid_steps"):
+            fit_weights([], grid_steps=-5)
+
+    def test_negative_permutations_raises(self) -> None:
+        with pytest.raises(ValueError, match="permutations"):
+            fit_weights([], permutations=-1)
+
+
+def test_default_has_no_significance() -> None:
+    samples = [
+        WeightSample(jetlag_residual=0.2, travel_fatigue=0.3, outcome=-0.1),
+        WeightSample(jetlag_residual=0.8, travel_fatigue=0.7, outcome=-0.9),
+    ]
+    result = fit_weights(samples)
+    assert result["significance"]["permutations"] == 0
+    assert result["significance"]["seed"] == 12345
+    assert result["significance"]["p_value"] is None
+
+
+def test_return_keys_include_significance() -> None:
+    samples = [
+        WeightSample(jetlag_residual=0.2, travel_fatigue=0.3, outcome=-0.1),
+        WeightSample(jetlag_residual=0.8, travel_fatigue=0.7, outcome=-0.9),
+    ]
+    result = fit_weights(samples)
+    assert set(result) == {"n", "best", "current", "curve", "significance"}
+
+
+class TestFitWeightsPermutation:
+    def _strong_signal_samples(
+        self, n: int = 120, w1_true: float = 0.3, noise: float = 0.05, seed: int = 1
+    ) -> list[WeightSample]:
+        rng = random.Random(seed)  # noqa: S311  # nosec B311
+        w2 = 1.0 - w1_true
+        out = []
+        for _ in range(n):
+            jr = rng.uniform(0.0, 1.0)
+            tf = rng.uniform(0.0, 1.0)
+            ri = recompute_rested_index(jr, tf, w1_true, w2)
+            out.append(
+                WeightSample(
+                    jetlag_residual=jr, travel_fatigue=tf, outcome=-5.0 * ri + rng.gauss(0.0, noise)
+                )
+            )
+        return out
+
+    def _noise_samples(self, n: int = 80, seed: int = 2) -> list[WeightSample]:
+        rng = random.Random(seed)  # noqa: S311  # nosec B311
+        out = []
+        for _ in range(n):
+            out.append(
+                WeightSample(
+                    jetlag_residual=rng.uniform(0.0, 1.0),
+                    travel_fatigue=rng.uniform(0.0, 1.0),
+                    outcome=rng.gauss(0.0, 1.0),
+                )
+            )  # independent of inputs
+        return out
+
+    def test_p_value_in_unit_interval(self) -> None:
+        samples = self._strong_signal_samples()
+        result = fit_weights(samples, permutations=200, seed=7)
+        p = result["significance"]["p_value"]
+        assert p is not None and 0.0 < p <= 1.0
+
+    def test_p_value_deterministic_with_fixed_seed(self) -> None:
+        samples = self._strong_signal_samples()
+        result_1 = fit_weights(samples, permutations=100, seed=99)
+        result_2 = fit_weights(samples, permutations=100, seed=99)
+        assert result_1["significance"]["p_value"] == result_2["significance"]["p_value"]
+
+    def test_strong_signal_low_p_value(self) -> None:
+        samples = self._strong_signal_samples()
+        result = fit_weights(samples, permutations=200, seed=11)
+        assert result["significance"]["p_value"] < 0.05
+
+    def test_pure_noise_high_p_value(self) -> None:
+        # Outcome independent of the inputs: the observed most-negative grid
+        # correlation is just a draw from the permutation null, so p should be
+        # large. Dataset seed 9 sits comfortably high (~0.97) across perm seeds.
+        samples = self._noise_samples(seed=9)
+        result = fit_weights(samples, permutations=400, seed=13)
+        p_value = result["significance"]["p_value"]
+        assert p_value is not None and p_value > 0.5
+
+    def test_permutation_skipped_when_observed_pearson_none(self) -> None:
+        # Constant outcome -> zero variance -> the observed best pearson is None,
+        # so the permutation block short-circuits (observed is None) and p_value
+        # is None. (Shuffling a constant stays constant, so a "defined observed
+        # but every shuffle degenerate" valid==0 case is unreachable for real
+        # data; this covers the observed-None skip path.)
+        samples = [
+            WeightSample(jetlag_residual=0.2, travel_fatigue=0.3, outcome=0.5),
+            WeightSample(jetlag_residual=0.8, travel_fatigue=0.7, outcome=0.5),
+            WeightSample(jetlag_residual=0.5, travel_fatigue=0.5, outcome=0.5),
+        ]
+        result = fit_weights(samples, permutations=50)
+        assert result["best"]["pearson"] is None
+        assert result["significance"]["p_value"] is None
+
+    def test_significance_block_records_params(self) -> None:
+        samples = self._strong_signal_samples()
+        result = fit_weights(samples, permutations=10, seed=42)
+        assert result["significance"]["permutations"] == 10
+        assert result["significance"]["seed"] == 42

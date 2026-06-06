@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +44,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Developer-only surface gate
+# ---------------------------------------------------------------------------
+
+
+def _require_dev_surface() -> None:
+    """FastAPI dependency hiding developer-only routes from end users.
+
+    Returns **404** (not 403) when running on Vercel production
+    (``VERCEL_ENV == "production"``), so a gated route is indistinguishable from
+    one that does not exist. On preview deployments and locally (``VERCEL_ENV``
+    unset / ``"preview"`` / ``"development"``) the route is served normally — so
+    developers can view it via a PR preview URL or `uvicorn`, while production
+    users cannot reach it. ``VERCEL_ENV`` is set automatically by Vercel.
+    """
+    if os.environ.get("VERCEL_ENV") == "production":
+        raise HTTPException(status_code=404, detail="Not Found")
+
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -146,17 +165,52 @@ def season_drivers() -> dict[str, Any]:
     return {"rows": queries.season_drivers()}
 
 
+@app.get("/insights/mc-summary", dependencies=[Depends(_require_dev_surface)])
+def mc_summary() -> dict[str, Any]:
+    """MC dashboard — headline stats + the result_percentile calibration histogram.
+
+    Zeros / an empty histogram until the Monte-Carlo sync (sync.montecarlo) has
+    stamped distributional props on the representative Performance nodes.
+    """
+    return queries.mc_summary()
+
+
+@app.get("/insights/mc-performances", dependencies=[Depends(_require_dev_surface)])
+def mc_performances(sort: str = "upsets", limit: int = 50) -> dict[str, Any]:
+    """MC dashboard — top representative Performances by a Monte-Carlo lens.
+
+    ``sort`` is one of ``upsets`` / ``overperformed`` / ``underperformed`` /
+    ``dominant`` / ``volatile`` (unknown ⇒ ``upsets``). Empty until sync.montecarlo
+    has run.
+    """
+    return {"rows": queries.mc_performances(sort=sort, limit=limit)}
+
+
 # ---------------------------------------------------------------------------
 # Static neighborhood viz
 # ---------------------------------------------------------------------------
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+#: Developer-only pages, kept OUT of the publicly mounted ``/static`` dir so they
+#: are reachable only through their gated route (never as a raw static file).
+_DEV_STATIC_DIR = Path(__file__).resolve().parent / "static_dev"
 
 
 @app.get("/")
 def index() -> FileResponse:
     """Serve the self-contained neighborhood-viz single page."""
     return FileResponse(_STATIC_DIR / "index.html")
+
+
+@app.get("/mc", dependencies=[Depends(_require_dev_surface)])
+def mc_dashboard() -> FileResponse:
+    """Serve the self-contained Monte-Carlo outcome-variable dashboard.
+
+    Developer-only (see :func:`_require_dev_surface`): 404s in Vercel production.
+    Served from :data:`_DEV_STATIC_DIR` (not the public ``/static`` mount) so the
+    page cannot be fetched as a raw static asset that would bypass the gate.
+    """
+    return FileResponse(_DEV_STATIC_DIR / "mc.html")
 
 
 # Mount the static directory too (so the page could reference assets if added).

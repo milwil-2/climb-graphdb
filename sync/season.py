@@ -59,6 +59,7 @@ _ROLLUP_PROPS = (
     "season_skill",
     "season_consistency",
     "mean_rested_index",
+    "mean_over_under",
 )
 
 app = typer.Typer(
@@ -186,7 +187,6 @@ def _write_season_summaries(
             "n_events": agg.n_events,
             "n_upsets": agg.n_upsets,
             "over_under": agg.over_under,
-            "mean_over_under": agg.mean_over_under,
         }
         for name in _ROLLUP_PROPS:
             val = getattr(agg, name)

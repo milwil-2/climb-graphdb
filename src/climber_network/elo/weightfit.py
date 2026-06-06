@@ -31,13 +31,14 @@ Usage::
 
     from climber_network.elo.weightfit import WeightSample, fit_weights
 
-    samples = [WeightSample(jr=0.8, tf=0.6, outcome=-0.3), ...]
+    samples = [WeightSample(jetlag_residual=0.8, travel_fatigue=0.6, outcome=-0.3), ...]
     result = fit_weights(samples)
     print(result["best"])   # {"w1": ..., "w2": ..., "pearson": ...}
 """
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -110,10 +111,29 @@ class WeightSample:
     travel_direction: str | None = field(default=None)
 
 
+def _best_pearson(rested_by_grid: list[list[float]], outcomes: list[float]) -> float | None:
+    """Most-negative non-None Pearson over the precomputed grid, or None.
+
+    ``rested_by_grid`` holds one recomputed ``rested_index`` vector per grid
+    point (independent of the outcome vector), so a permutation test can
+    reuse them across shuffles of *outcomes* without recomputing the index.
+    """
+    best: float | None = None
+    for rested in rested_by_grid:
+        r = pearson(rested, outcomes)
+        if r is None:
+            continue
+        if best is None or r < best:
+            best = r
+    return best
+
+
 def fit_weights(
     samples: list[WeightSample],
     *,
     grid_steps: int = 101,
+    permutations: int = 0,
+    seed: int = 12345,
 ) -> dict[str, Any]:
     """Grid-search ``w1`` to find the weights that best express the travel signal.
 
@@ -134,12 +154,16 @@ def fit_weights(
     (``w1 = 0.7``) and both ``best`` and ``current`` Pearson values are ``None``.
 
     Args:
-        samples:    Observations to fit against.  Empty list is accepted.
-        grid_steps: Number of evenly-spaced points in ``[0, 1]`` to evaluate.
-                    Must be >= 2.  Default 101 gives a step of 0.01.
+        samples:      Observations to fit against.  Empty list is accepted.
+        grid_steps:   Number of evenly-spaced points in ``[0, 1]`` to evaluate.
+                      Must be >= 2; raises ValueError otherwise.  Default 101
+                      gives a step of 0.01.
+        permutations: Number of label-shuffled refits for the opt-in permutation
+                      test.  Default 0 skips it.
+        seed:         Seed used for the permutation-test RNG.
 
     Returns:
-        A dict with four keys:
+        A dict with five keys:
 
         ``"n"``
             Number of samples provided.
@@ -152,24 +176,45 @@ def fit_weights(
         ``"curve"``
             List of ``{"w1", "w2", "pearson"}`` dicts for all ``grid_steps``
             candidates in ``w1`` order — useful for plotting.
+        ``"significance"``
+            ``{"permutations": int, "seed": int, "p_value": float | None}``.
+            The p-value is
+            ``(#{permuted best <= observed} + 1) / (#valid permutations + 1)``:
+            the fraction of label-shuffled refits at least as extreme as the
+            observed best.  It is ``None`` when the test is skipped
+            (``permutations=0``) or no valid correlation is available — fewer
+            than 2 samples, an undefined observed best, or every permutation
+            yielding an undefined correlation (degenerate inputs).
     """
-    n = len(samples)
+    if grid_steps < 2:
+        msg = f"grid_steps must be >= 2, got {grid_steps!r}"
+        raise ValueError(msg)
+    if permutations < 0:
+        msg = f"permutations must be >= 0, got {permutations!r}"
+        raise ValueError(msg)
 
-    # Build the outcome vector once — it's constant across all w1 candidates.
+    n = len(samples)
     outcomes: list[float] = [s.outcome for s in samples]
 
-    # Evaluate every grid point.
-    curve: list[dict[str, Any]] = []
+    # Precompute the rested vector for each grid point (independent of the
+    # outcome vector) so the permutation test can reuse them across shuffles.
+    grid: list[tuple[float, float]] = []
+    rested_by_grid: list[list[float]] = []
     for i in range(grid_steps):
-        w1 = i / (grid_steps - 1) if grid_steps > 1 else 0.0
+        w1 = i / (grid_steps - 1)
         w2 = 1.0 - w1
+        grid.append((w1, w2))
         if n >= 2:
-            rested = [
-                recompute_rested_index(s.jetlag_residual, s.travel_fatigue, w1, w2) for s in samples
-            ]
-            r = pearson(rested, outcomes)
-        else:
-            r = None
+            rested_by_grid.append(
+                [
+                    recompute_rested_index(s.jetlag_residual, s.travel_fatigue, w1, w2)
+                    for s in samples
+                ]
+            )
+
+    curve: list[dict[str, Any]] = []
+    for idx, (w1, w2) in enumerate(grid):
+        r = pearson(rested_by_grid[idx], outcomes) if n >= 2 else None
         curve.append({"w1": w1, "w2": w2, "pearson": r})
 
     # --- best: MOST NEGATIVE correlation -------------------------------------
@@ -203,9 +248,38 @@ def fit_weights(
         current_pearson = None
     current: dict[str, Any] = {"w1": _PRIOR_W1, "w2": _PRIOR_W2, "pearson": current_pearson}
 
+    # Significance of the most-negative selection: a permutation test. Shuffle
+    # the outcome vector `permutations` times (seeded), refit the most-negative
+    # grid Pearson each time, and report the fraction of shuffles at least as
+    # extreme (<=) as the observed best. Opt-in: permutations=0 (default) skips
+    # it. The add-one estimator keeps p in (0, 1] when at least one permutation
+    # yields a valid correlation (p_value is None otherwise).
+    p_value: float | None = None
+    observed = best["pearson"]
+    if permutations >= 1 and n >= 2 and observed is not None:
+        rng = random.Random(seed)  # noqa: S311  # nosec B311
+        count_le = 0
+        valid = 0
+        for _ in range(permutations):
+            shuffled = outcomes[:]
+            rng.shuffle(shuffled)
+            perm_best = _best_pearson(rested_by_grid, shuffled)
+            if perm_best is None:
+                continue
+            valid += 1
+            if perm_best <= observed:
+                count_le += 1
+        p_value = (count_le + 1) / (valid + 1) if valid else None
+    significance: dict[str, Any] = {
+        "permutations": permutations,
+        "seed": seed,
+        "p_value": p_value,
+    }
+
     return {
         "n": n,
         "best": best,
         "current": current,
         "curve": curve,
+        "significance": significance,
     }

@@ -84,8 +84,16 @@ def test_mean_none_when_no_data() -> None:
     assert agg.season_consistency is None
     assert agg.mean_rested_index is None
     assert agg.over_under == 0.0
-    # n_events == 1 (one record) but no residuals -> mean_over_under == 0.0.
-    assert agg.mean_over_under == 0.0
+    # n_events == 1 but there are no residuals -> mean_over_under is None (over_under stays 0.0).
+    assert agg.mean_over_under is None
+
+
+def test_mean_over_under_none_when_no_residuals_but_rested() -> None:
+    (agg,) = aggregate_seasons([_rec(rested_index=0.5, elo_residual=None)])
+    assert agg.over_under == 0.0
+    assert agg.mean_over_under is None
+    assert agg.mean_rested_index == 0.5
+    assert agg.n_events == 1
 
 
 def test_n_upsets_honors_threshold() -> None:
@@ -128,12 +136,36 @@ def test_mean_over_under_is_sum_over_n_events() -> None:
     assert agg.over_under != agg.mean_over_under
 
 
+def test_mean_over_under_zero_sum_residuals_is_zero_not_none() -> None:
+    # Residuals present but summing to exactly 0.0 must give mean_over_under == 0.0
+    # (data that cancels), NOT None (no data) — this is the `if residuals` boundary
+    # the fix turns on (vs the old `if n_events > 0`).
+    records = [_rec(elo_residual=1.0), _rec(elo_residual=-1.0)]
+    (agg,) = aggregate_seasons(records)
+    assert agg.over_under == 0.0
+    assert agg.mean_over_under == 0.0
+    assert agg.mean_over_under is not None
+
+
 def test_empty_input() -> None:
     assert aggregate_seasons([]) == []
     report = season_drivers_report([])
     assert report["overall"] == {"pearson_r": None, "n": 0}
     assert report["by_discipline"] == {}
     assert "negative correlation" in report["success_signal"]
+
+
+def test_drivers_excludes_seasons_without_outcome_data() -> None:
+    records = [
+        _rec("ath:1", 2024, "L", elo_residual=None, rested_index=0.4),
+        _rec("ath:1", 2024, "L", elo_residual=None, rested_index=0.6),
+    ]
+    aggregates = aggregate_seasons(records)
+    report = season_drivers_report(aggregates)
+    assert report["overall"] == {"pearson_r": None, "n": 0}
+    # The per-discipline partition runs the same _drivers_block, so the lone
+    # "L" season is excluded there too.
+    assert report["by_discipline"]["L"] == {"pearson_r": None, "n": 0}
 
 
 def test_drivers_report_shape_and_known_sign() -> None:
@@ -204,3 +236,56 @@ def test_drivers_report_skips_aggregates_without_rested_index() -> None:
     report = season_drivers_report(aggs)
     # Only one aggregate has rested_index -> n=1 -> pearson undefined (None).
     assert report["overall"] == {"pearson_r": None, "n": 1}
+
+
+def test_drivers_block_requires_both_fields() -> None:
+    aggs = [
+        SeasonAggregate(
+            athlete_id="ath:1",
+            season=2024,
+            discipline="L",
+            n_events=1,
+            mean_elo_residual=None,
+            mean_result_percentile=None,
+            mean_surprisal=None,
+            season_skill=None,
+            season_consistency=None,
+            mean_rested_index=0.5,
+            n_upsets=0,
+            over_under=0.0,
+            mean_over_under=None,
+        ),
+        SeasonAggregate(
+            athlete_id="ath:2",
+            season=2024,
+            discipline="L",
+            n_events=1,
+            mean_elo_residual=None,
+            mean_result_percentile=None,
+            mean_surprisal=None,
+            season_skill=None,
+            season_consistency=None,
+            mean_rested_index=None,
+            n_upsets=0,
+            over_under=3.0,
+            mean_over_under=3.0,
+        ),
+        SeasonAggregate(
+            athlete_id="ath:3",
+            season=2024,
+            discipline="L",
+            n_events=1,
+            mean_elo_residual=None,
+            mean_result_percentile=None,
+            mean_surprisal=None,
+            season_skill=None,
+            season_consistency=None,
+            mean_rested_index=0.7,
+            n_upsets=0,
+            over_under=2.0,
+            mean_over_under=2.0,
+        ),
+    ]
+    report = season_drivers_report(aggs)
+    assert report["overall"]["n"] == 1
+    assert report["overall"]["pearson_r"] is None

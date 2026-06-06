@@ -41,7 +41,8 @@ from climber_network.elo.reps import (
     select_representative_rounds,
     sigma_before_lookup,
 )
-from climber_network.source import pg
+from climber_network.source import cohort, pg
+from climber_network.source.cohort import CohortScope
 
 app = typer.Typer(
     add_completion=False,
@@ -108,6 +109,7 @@ def advancement(
     session: pg.Session,
     *,
     params: MonteCarloParams = MC_PARAMS,
+    scope: CohortScope | None = None,
 ) -> AdvReport:
     """Simulate multi-round event progressions and stamp advancement props. Idempotent.
 
@@ -142,11 +144,11 @@ def advancement(
     report = AdvReport()
 
     # ---- Load source data ---------------------------------------------------
-    rounds_all = list(pg.iter_rows(session, pg.Round))
-    results_all = list(pg.iter_rows(session, pg.Result))
+    rounds_all = list(pg.iter_rows(session, pg.Round, scope=scope))
+    results_all = list(pg.iter_rows(session, pg.Result, scope=scope))
 
-    mu_before = mu_before_lookup(session)
-    sigma_before = sigma_before_lookup(session)
+    mu_before = mu_before_lookup(session, scope=scope)
+    sigma_before = sigma_before_lookup(session, scope=scope)
 
     # ---- Select representative rounds (for stamping) ------------------------
     src_rounds_out = [0]
@@ -156,6 +158,7 @@ def advancement(
         report.skipped,
         src_rounds_out=src_rounds_out,
         src_results_out=src_results_out,
+        scope=scope,
     )
 
     # Index reps by (athlete_id, event_id) for fast lookup.
@@ -297,12 +300,18 @@ _DB_OPT = typer.Option(
     "--database-url",
     help="Override the source connection URL (default: config.DATABASE_URL).",
 )
+_COHORT_OPT = typer.Option(
+    None,
+    "--cohort/--no-cohort",
+    help="Restrict to the MVP cohort slice (default: the COHORT_ENABLED env var).",
+)
 
 
 @app.command()
 def run(
     out: Path | None = _OUT_OPT,
     database_url: str | None = _DB_OPT,
+    cohort_flag: bool | None = _COHORT_OPT,
 ) -> None:
     """Run the L3c advancement-projection build against the configured source DB + Neo4j."""
     from rich.console import Console
@@ -313,7 +322,8 @@ def run(
     engine = pg.make_engine(database_url)
     client = get_client()
     with pg.read_session(engine) as session:
-        report = advancement(client, session)
+        scope = cohort.scope_from_config(session, override=cohort_flag)
+        report = advancement(client, session, scope=scope)
     report.log(console)
 
     if out is not None:

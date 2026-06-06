@@ -60,7 +60,8 @@ from climber_network.elo.reps import (
 # ``elo.rested`` helper — the same join the closed-form report uses. REST_QUERY
 # is re-exported here so existing callers/tests can import it from this module.
 from climber_network.elo.rested import REST_QUERY
-from climber_network.source import pg
+from climber_network.source import cohort, pg
+from climber_network.source.cohort import CohortScope
 
 # ``REST_QUERY`` is re-exported from here so existing callers/tests can import it
 # from this module after the shared correlation join moved to ``elo.rested``.
@@ -314,6 +315,7 @@ def monte_carlo(
     session: pg.Session,
     *,
     params: MonteCarloParams = MC_PARAMS,
+    scope: CohortScope | None = None,
 ) -> McReport:
     """Compute the MC placement outcomes + correlation report. Idempotent.
 
@@ -332,13 +334,14 @@ def monte_carlo(
         report.skipped,
         src_rounds_out=src_rounds_out,
         src_results_out=src_results_out,
+        scope=scope,
     )
     report.src_rounds = src_rounds_out[0]
     report.src_results = src_results_out[0]
 
-    mu_before = mu_before_lookup(session)
-    sigma_before = sigma_before_lookup(session)
-    rosters = round_rosters(session, mu_before)
+    mu_before = mu_before_lookup(session, scope=scope)
+    sigma_before = sigma_before_lookup(session, scope=scope)
+    rosters = round_rosters(session, mu_before, scope=scope)
     mc_reps = compute_monte_carlo(reps, mu_before, sigma_before, rosters, report, params=params)
     report.rep_rounds = len(mc_reps)
     report.reps = mc_reps
@@ -362,12 +365,18 @@ _DB_OPT = typer.Option(
     "--database-url",
     help="Override the source connection URL (default: config.DATABASE_URL).",
 )
+_COHORT_OPT = typer.Option(
+    None,
+    "--cohort/--no-cohort",
+    help="Restrict to the MVP cohort slice (default: the COHORT_ENABLED env var).",
+)
 
 
 @app.command()
 def run(
     out: Path | None = _OUT_OPT,
     database_url: str | None = _DB_OPT,
+    cohort_flag: bool | None = _COHORT_OPT,
 ) -> None:
     """Run the L3b Monte-Carlo build against the configured source DB + Neo4j."""
     from rich.console import Console
@@ -378,7 +387,8 @@ def run(
     engine = pg.make_engine(database_url)
     client = get_client()
     with pg.read_session(engine) as session:
-        report = monte_carlo(client, session)
+        scope = cohort.scope_from_config(session, override=cohort_flag)
+        report = monte_carlo(client, session, scope=scope)
     report.log(console)
 
     if out is not None:

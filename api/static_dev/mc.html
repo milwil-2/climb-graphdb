@@ -66,6 +66,9 @@
     .error { color: var(--accent); }
     .table-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 8px 4px; overflow-x: auto; }
     .legend { margin: 10px 2px 0; font-size: 11px; color: var(--muted); }
+    .why { white-space: normal; max-width: 320px; color: var(--muted); font-size: 12px; }
+    .why .pred { color: var(--text); display: block; }
+    .why .reason { display: block; }
   </style>
 </head>
 <body>
@@ -112,7 +115,7 @@
               <th>Athlete</th><th>Event</th><th>Round</th>
               <th>Rank</th><th>Pctl</th><th>Surprisal</th>
               <th>P(win)</th><th>P(podium)</th><th>Rank σ</th>
-              <th>Resid</th><th>Resid (MC)</th>
+              <th>Resid</th><th>Resid (MC)</th><th>Why</th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -122,6 +125,9 @@
         <strong>Pctl</strong> = P(finish ≤ actual): low ⇒ overperformed (green), high ⇒ underperformed (red).
         <strong>Surprisal</strong> = −log P(rank); higher ⇒ more unlikely.
         <strong>Resid</strong> = closed-form elo_residual (actual − expected); <strong>Resid (MC)</strong> = its Monte-Carlo analogue.
+        <strong>P(podium)</strong> = modeled chance of a top-3 finish.
+        <strong>Rank &sigma;</strong> = std-dev of the simulated finishing rank (spread / volatility).
+        <strong>Why</strong> = predicted placing (<code>expected &asymp; N</code> from the MC mean rank, with <code>of M</code> when the field size is known) plus a one-line, lens-specific reason for the current sort.
       </div>
     </div>
   </main>
@@ -187,7 +193,7 @@
       const resp = await fetch("/insights/mc-performances?sort=" + encodeURIComponent(sort) + "&limit=50");
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const data = await resp.json();
-      drawRows(data.rows || []);
+      drawRows(data.rows || [], sort);
       document.getElementById("board").style.display = "block";
     }
 
@@ -198,7 +204,37 @@
       return td;
     }
 
-    function drawRows(rows) {
+    function predictedPlacing(r) {
+      const exp = Number(r.expected_rank_mc);
+      if (!Number.isFinite(exp)) return "expected placing —";
+      const field = r.field_size ? " of " + r.field_size : "";
+      return "expected ≈ " + Math.round(exp) + field;
+    }
+
+    function reasonFor(r, sort) {
+      const pctl = Number(r.result_percentile);
+      switch (sort) {
+        case "upsets":
+          return "Unlikely finish (surprisal " + fmt(r.surprisal, 2) + "): "
+            + (pctl <= 0.5 ? "beat" : "fell short of") + " the predicted placing.";
+        case "overperformed":
+          return "Finished better than predicted — only " + fmt(pctl * 100, 0)
+            + "% of simulated outcomes were this good or better.";
+        case "underperformed":
+          return "Finished worse than predicted — only " + fmt((1 - pctl) * 100, 0)
+            + "% of simulated outcomes were this bad or worse.";
+        case "dominant":
+          return "Heavy favourite: P(win) " + fmt(r.p_win, 3)
+            + ", P(podium) " + fmt(r.p_podium, 3) + ".";
+        case "volatile":
+          return "Wide placement spread (rank σ " + fmt(r.rank_std, 2)
+            + ", entropy " + fmt(r.pmf_entropy, 2) + ") — outcome was hard to predict.";
+        default:
+          return "";
+      }
+    }
+
+    function drawRows(rows, sort) {
       const tbody = document.getElementById("rows");
       tbody.replaceChildren();
       rows.forEach((r) => {
@@ -228,12 +264,23 @@
         tr.appendChild(cell(fmt(r.rank_std, 2), "num"));
         tr.appendChild(cell(fmt(r.elo_residual, 1), "num"));
         tr.appendChild(cell(fmt(r.elo_residual_mc, 1), "num"));
+        const whyTd = document.createElement("td");
+        whyTd.className = "why";
+        const pred = document.createElement("span");
+        pred.className = "pred";
+        pred.textContent = predictedPlacing(r);
+        const reason = document.createElement("span");
+        reason.className = "reason";
+        reason.textContent = reasonFor(r, sort);
+        whyTd.appendChild(pred);
+        whyTd.appendChild(reason);
+        tr.appendChild(whyTd);
         tbody.appendChild(tr);
       });
       if (!rows.length) {
         const tr = document.createElement("tr");
         const td = cell("No rows.");
-        td.colSpan = 11;
+        td.colSpan = 12;
         td.className = "muted";
         tr.appendChild(td);
         tbody.appendChild(tr);
